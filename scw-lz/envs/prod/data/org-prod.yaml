@@ -1,0 +1,123 @@
+# ===========================================================================
+# Bootstrap - Organization setup (committed template, sanitized - no real values).
+# What this file creates: org-level projects, IAM groups/SAs, policies, SSH
+# keys, KMS keys, audit buckets, secrets, optional SSO.
+# How to use: copy to org-<env>-demo.yaml (same folder, gitignored) and fill
+# in your values - stages prefer the -demo.* file when present.
+# ===========================================================================
+
+# Projects to create in the organization.
+# To reuse an existing project (e.g. already-created prod), set `project_id:`
+# instead of letting the stage create it.
+projects:
+  prod:
+    name: prod
+    description: Project for production environment
+
+
+# IAM Groups
+iam_groups:
+  developers:
+    name: developers
+    description: Group for developers
+
+  admins:
+    name: admins
+    description: Group for administrators
+
+
+# IAM Service Accounts (Applications)
+service_accounts:
+  cicd:
+    name: cicd
+    description: Service account for CI/CD
+    create_api_key: true
+    store_key_in_secret_manager: true
+    secret_key: cicd-api-key
+
+
+# IAM Policies - bind permission sets to groups/service accounts.
+# group_id / application_id reference keys defined above in this file.
+iam_policies:
+  admins_full_access:
+    name: admins-full-access
+    description: Full access for admins group
+    group_id: admins
+    rules:
+      - permission_set_names:
+          - ObjectStorageFullAccess
+
+  developers_readonly:
+    name: developers-readonly
+    description: Read-only access for developers group
+    group_id: developers
+    rules:
+      - permission_set_names:
+          - ObjectStorageReadOnly
+
+  cicd_deploy:
+    name: cicd-deploy
+    description: Deploy access for CI/CD service account
+    application_id: cicd
+    rules:
+      - permission_set_names:
+          - ObjectStorageObjectsWrite
+          - ObjectStorageObjectsRead
+          - ContainerRegistryFullAccess
+
+
+# SSH Keys (auto-generated key pairs)
+ssh_keys:
+  admin_key:
+    name: admin
+    algorithm: ED25519
+    project_key: prod
+
+
+# KMS - Customer-Managed Encryption Keys
+kms_keys:
+  default:
+    name: default
+    description: Default KMS key for CMEK encryption
+    project_key: prod
+    unprotected: true
+
+
+# Object Storage - Centralized Audit Log Buckets
+audit_log_buckets:
+  audit_logs:
+    name: audit-logs
+    project_key: prod
+    tags:
+      purpose: audit
+      compliance: "true"
+    enable_lock: true
+    enable_sse: true
+
+
+# Secret Manager - Store sensitive values
+secrets:
+  cicd-api-key:
+    name: cicd-api-key
+    description: API key for CI/CD service account
+    project_key: prod
+
+
+# SSO - org-level identity federation (SAML + SCIM). OPT-IN: leave unset for
+# orgs not using it. Enable SAML, validate a test member, then disable
+# password auth (Owner stays break-glass).
+#
+# sso:
+#   authentik:
+#     enabled: false
+#     entity_id: https://idp.example.com/saml/metadata
+#     single_sign_on_url: https://idp.example.com/saml/sso
+#     enable_scim: true
+#     store_scim_token_in_secret_manager: true
+#     project_key: dev
+#     certs:
+#       - type: signing
+#         content: |
+#           -----BEGIN CERTIFICATE-----
+#           <IdP signing certificate>
+#           -----END CERTIFICATE-----

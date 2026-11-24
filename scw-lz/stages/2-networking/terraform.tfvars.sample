@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# Stage 2, Networking: Sample Terraform Variables
+# Copy this sample to: scw-lz/envs/<env>/2-networking-<env>.tfvars
+# Resource definitions (VPCs, peerings, routes, ACLs, gateways, DNS,
+# firewall appliances, load balancers) live in: envs/<env>/data/networking-<env>.yaml
+# You can override any resource by setting the same map keys in this file,
+# as these take precedence over the YAML data.
+# ---------------------------------------------------------------------------
+
+organization_id = "YOUR_ORG_ID"
+region          = "fr-par"
+zone            = "fr-par-2"
+
+# Which project from Stage 0 to deploy networking resources into
+project_key = "dev"
+
+# ---------------------------------------------------------------------------
+# Optional: Override specific resources from the YAML factory
+# Uncomment and modify to override a single VPC, for example:
+# vpcs = {
+#   spoke-1 = {
+#     name = "spoke-1"
+#     ...
+#   }
+# }
+# ---------------------------------------------------------------------------

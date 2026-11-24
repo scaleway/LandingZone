@@ -1,0 +1,156 @@
+# ===========================================================================
+# Stage 4 - Project Factory (committed template, sanitized - no real values).
+# What this file creates: per-team projects with their VPCs, service
+# accounts, IAM groups/policies, hub peering, and object storage buckets.
+# How to use: copy to projects-<env>-demo.yaml (same folder, gitignored) and
+# fill in your values - stages prefer the -demo.* file when present.
+# ===========================================================================
+
+# Projects - application/team-level projects
+projects:
+  team_a_app:
+    name: team-a-app
+    description: Team A application project
+    tags:
+      - team-a
+      - app
+    vpc:
+      name: team-a-vpc
+      private_networks:
+        default:
+          name: default
+          ipv4_subnet_cidr: 172.21.0.0/24
+
+  team_b_data:
+    name: team-b-data
+    description: Team B data platform project
+    tags:
+      - team-b
+      - data
+    vpc:
+      name: team-b-vpc
+      private_networks:
+        default:
+          name: default
+          ipv4_subnet_cidr: 172.22.0.0/24
+
+
+# Service Accounts - Per-project automation SAs
+service_accounts:
+  team_a_rw:
+    name: team-a-rw
+    description: Read/write automation SA for Team A
+    project_key: team_a_app
+    create_api_key: true
+    api_key_description: API key for Team A read/write SA
+
+  team_a_ro:
+    name: team-a-ro
+    description: Read-only automation SA for Team A
+    project_key: team_a_app
+    create_api_key: true
+    api_key_description: API key for Team A read-only SA
+
+  team_b_rw:
+    name: team-b-rw
+    description: Read/write automation SA for Team B
+    project_key: team_b_data
+    create_api_key: true
+    api_key_description: API key for Team B read/write SA
+
+  team_b_ro:
+    name: team-b-ro
+    description: Read-only automation SA for Team B
+    project_key: team_b_data
+    create_api_key: true
+    api_key_description: API key for Team B read-only SA
+
+
+# IAM Groups - Per-project groups
+iam_groups:
+  team_a_admins:
+    name: team-a-admins
+    description: Team A admins group
+
+  team_a_developers:
+    name: team-a-developers
+    description: Team A developers group
+    application_ids:
+      - team_a_rw
+
+  team_b_admins:
+    name: team-b-admins
+    description: Team B admins group
+
+  team_b_developers:
+    name: team-b-developers
+    description: Team B developers group
+    application_ids:
+      - team_b_rw
+
+
+# IAM Policies - Scoped to factory projects
+iam_policies:
+  team_a_admins_full:
+    name: team-a-admins-full
+    description: Full access for Team A admins
+    group_id: team_a_admins
+    rules:
+      - permission_set_names:
+          - ObjectStorageFullAccess
+
+  team_a_devs_rw:
+    name: team-a-devs-rw
+    description: Read/write access for Team A developers
+    application_id: team_a_rw
+    rules:
+      - permission_set_names:
+          - ObjectStorageObjectsRead
+          - ObjectStorageObjectsWrite
+
+  team_b_admins_full:
+    name: team-b-admins-full
+    description: Full access for Team B admins
+    group_id: team_b_admins
+    rules:
+      - permission_set_names:
+          - ObjectStorageFullAccess
+
+  team_b_devs_rw:
+    name: team-b-devs-rw
+    description: Read/write access for Team B developers
+    application_id: team_b_rw
+    rules:
+      - permission_set_names:
+          - ObjectStorageObjectsRead
+          - ObjectStorageObjectsWrite
+
+
+# VPC Peering - Connect each factory project to the hub VPC (hub VPC ID comes
+# from Stage 2 remote state).
+vpc_peerings:
+  team_a:
+    name: team-a-peering
+    project_key: team_a_app
+    source_vpc_cidr: 10.10.0.0/24
+    target_vpc_cidr: 172.21.0.0/24
+    tags:
+      - team-a
+      - peering
+
+  team_b:
+    name: team-b-peering
+    project_key: team_b_data
+    source_vpc_cidr: 10.10.0.0/24
+    target_vpc_cidr: 172.22.0.0/24
+    tags:
+      - team-b
+      - peering
+
+
+# Object Storage - Per-project buckets
+# NOTE: team state buckets intentionally NOT created here - the names
+# lz-<env>-team-a/b-terraform-state collide with pre-existing buckets in this
+# org (BucketAlreadyOwnedByYou on apply). Re-add with a per-user prefix if
+# per-team state buckets are needed.
+

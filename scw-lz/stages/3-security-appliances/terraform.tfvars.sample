@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Stage 3 - Security Appliances: Sample terraform.tfvars
+# HA OPNsense CARP pair (blueprint method) - see docs/STAGE3-REBUILD-PLAN.md
+# Copy this sample to: scw-lz/envs/<env>/3-security-appliances-<env>.tfvars
+#
+# DESIGN DATA now lives in the per-env config folder
+# (envs/<env>/data/security-appliances-<env>.yaml: zones, IP plan, image
+# settings, flags, test instances). This file carries only the per-environment
+# wiring, secrets and keys - it is gitignored.
+# ---------------------------------------------------------------------------
+
+organization_id = "ORG-ID"
+project_key     = "dev"
+region          = "fr-par"
+zone            = "fr-par-2"
+
+# User prefix shared with the bootstrap buckets - MUST match the bootstrap
+# stage's state_bucket_prefix (0-org-setup-<env>.tfvars). In this stage it
+# only drives the image-import bucket name (<prefix>-<env>-image-import-<timestamp>).
+state_bucket_prefix = "lz-myorg"
+
+# ---------------------------------------------------------------------------
+# OPNsense secrets - never commit real values.
+# Generate the bcrypt hash for a chosen root password with:
+#   htpasswd -bnBC 12 "" '<password>' | tr -d ':\n'
+# ---------------------------------------------------------------------------
+opnsense_root_password      = "CHANGE-ME-OPNsense-Root!"
+opnsense_root_password_hash = "$2b$12$CHANGE-ME-BCRYPT-HASH"
+carp_password               = "CHANGE-ME-CARP-Secret!"
+
+# SSH keys are AUTOMATED (default ""): root/admin key derives from bootstrap's
+# live admin key; backup exporter key reads scw-lz/keys-<env>/fw-backup/id_ed25519.pub.
+# Only set these to OVERRIDE the automated source (e.g. prod pinning a
+# dedicated admin key).
+#   opnsense_ssh_public_key        = "ssh-ed25519 AAAA... (optional override)"
+#   opnsense_backup_ssh_public_key = "ssh-ed25519 AAAA... (optional override)"
+
+# S3 credentials that upload the firewall image object to the bucket
+# (enable_upload in the factory yaml). OPTIONAL - leave unset ("") when the
+# image is delivered via source_url or uploaded by the operator.
+#   upload_access_key = "SCW_UPLOAD_ACCESS_KEY"
+#   upload_secret_key = "SCW_UPLOAD_SECRET_KEY"
+
+# NOTE: the remote state backend is NOT set here - it comes from the
+# bootstrap-generated envs/<env>/backend-<env>.tfvars + remote_state-<env>.tfvars
+# (loaded automatically by scripts/apply.sh).

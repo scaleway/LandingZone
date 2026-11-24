@@ -1,0 +1,178 @@
+# ===========================================================================
+# Stage 2 - Networking (committed template, sanitized - no real values).
+# What this file creates: hub + spoke VPCs/private networks, VPC peering,
+# routes, optional ACLs, S2S VPN + on-prem lab (feeds Stage 6), optional
+# public gateways and DNS zones.
+# How to use: copy to networking-<env>-demo.yaml (same folder, gitignored) and
+# fill in your values - stages prefer the -demo.* file when present.
+# ===========================================================================
+
+# VPCs - hub + spoke VPCs, each with routing and private networks.
+vpcs:
+  hub:
+    name: hub
+    tags: []
+    enable_routing: true
+    enable_custom_routes_propagation: true
+    enable_transitivity: true  # Allow spoke-to-spoke transit through hub
+    private_networks:
+      hub-net:
+        name: hub-net
+        ipv4_subnet_cidr: 10.10.0.0/24
+
+  spoke-1:
+    name: spoke-1
+    tags: []
+    enable_routing: true
+    enable_custom_routes_propagation: true
+    enable_transitivity: true
+    private_networks:
+      spoke-1-net:
+        name: spoke-1-net
+        ipv4_subnet_cidr: 10.20.0.0/24
+
+  spoke-2:
+    name: spoke-2
+    tags: []
+    enable_routing: true
+    enable_transitivity: true
+    private_networks:
+      spoke-2-net:
+        name: spoke-2-net
+        ipv4_subnet_cidr: 10.30.0.0/24
+
+# ---------------------------------------------------------------------------
+# VPC Peering - Connect each spoke VPC to the hub VPC
+# Each connector is bidirectional; the module creates routes in BOTH VPCs.
+# Provide source_vpc_cidr and target_vpc_cidr to auto-create routes.
+# ---------------------------------------------------------------------------
+
+vpc_peerings:
+  hub-to-spoke-1:
+    source_vpc_key: hub
+    target_vpc_key: spoke-1
+    source_vpc_cidr: 10.10.0.0/24
+    target_vpc_cidr: 10.20.0.0/24
+
+  hub-to-spoke-2:
+    source_vpc_key: hub
+    target_vpc_key: spoke-2
+    source_vpc_cidr: 10.10.0.0/24
+    target_vpc_cidr: 10.30.0.0/24
+
+# ---------------------------------------------------------------------------
+# VPC Routes - Custom routes for spoke-to-spoke transit through hub
+# ---------------------------------------------------------------------------
+
+vpc_routes:
+  spoke-1-to-spoke-2:
+    vpc_key: spoke-1
+    routes:
+      to-spoke-2:
+        destination: 10.30.0.0/24
+        nexthop_vpc_connector_key: hub-to-spoke-1
+
+  spoke-2-to-spoke-1:
+    vpc_key: spoke-2
+    routes:
+      to-spoke-1:
+        destination: 10.20.0.0/24
+        nexthop_vpc_connector_key: hub-to-spoke-2
+
+# ---------------------------------------------------------------------------
+# VPC ACLs - Traffic filtering between Private Networks (optional)
+# ---------------------------------------------------------------------------
+
+vpc_acls: {}
+
+# Site-to-Site VPN - hybrid connectivity (on-prem <-> Scaleway).
+# Consumed by Stage 6. Managed VPN gateway (VGW-S) on the hub PN +
+# customer gateway + BGP + IPSec tunnel. PSK is auto-generated and stored in
+# Secret Manager. `onprem_lab_peer: true` terminates on the emulated lab below.
+s2s_vpn_connections:
+  on-prem-to-hub:
+    gateway_type: VGW-S
+    vpc_key: hub
+    private_network_key: hub-net
+    onprem_lab_peer: true            # terminate on the emulated on-prem gateway
+
+    customer_asn: 65000              # on-prem ASN (must differ from Scaleway's)
+
+    prefix_filter_in: [10.40.0.0/24]           # routes accepted from on-prem
+    prefix_filter_out: [10.110.0.0/24, 10.120.0.0/24, 10.130.0.0/24]  # routes advertised to on-prem (prod CIDR plan)
+
+    # Tunnel /30 must be UNIQUE per env within the org (S2S tunnel IP pool is
+    # org-scoped). dev holds 169.254.0.1/30, so prod uses the next /30.
+    bgp_private_ip: 169.254.0.5/30   # Scaleway BGP IP inside the tunnel
+    bgp_peer_private_ip: 169.254.0.6/30        # customer BGP IP inside the tunnel
+
+    ikev2_encryption: aes256
+    ikev2_integrity: sha256
+    ikev2_dh_group: modp2048
+    esp_encryption: aes256
+    esp_integrity: sha256
+    esp_dh_group: modp2048
+
+    tags: [hybrid, onprem-lab]
+
+# On-premises lab (Stage 6) - a separate lab VPC whose strongSwan+BIRD2
+# gateway terminates the managed tunnel. The workload VM proves end-to-end
+# connectivity. Set enabled: false to use a real on-prem peer instead.
+onprem_lab:
+  enabled: true
+  vpc:
+    name: onprem
+    tags: [onprem, tunnel]
+    enable_routing: true
+    enable_custom_routes_propagation: true
+    enable_transitivity: false
+    private_networks:
+      onprem-net:
+        name: onprem-net
+        ipv4_subnet_cidr: 10.40.0.0/24
+
+  # strongSwan + BIRD2 gateway instance
+  gateway:
+    name: onprem-gw
+    private_network_key: onprem-net
+    private_ip: 10.40.0.10            # pinned on the emulated LAN
+    asn: 65000                        # must match customer_asn above
+    local_tunnel_ip: 169.254.0.6/30   # this side of the /30 (BGP tunnel) - must match bgp_peer_private_ip
+    local_bgp_ip: 169.254.0.6
+    remote_tunnel_ip: 169.254.0.5     # the managed VGW tunnel address - must match bgp_private_ip
+    ssh_cidrs: [198.51.100.10/32]     # operator access (replace with YOUR IP)
+    # ssh_keys: optional extra operator keys (the org admin_key from bootstrap
+    #            is always injected by stage 6 - no key material here)
+
+  # Cloud CIDRs reachable through the tunnel (routes + BGP learn list)
+  cloud_cidrs: [10.10.0.0/24, 10.20.0.0/24, 10.30.0.0/24]
+
+  # Hub/test CIDRs allowed to SSH to the lab VMs through the tunnel (e.g. the
+  # hub-test agent). The gateway itself stays operator-only (ssh_cidrs above).
+  cloud_ssh_cidrs: [10.10.0.0/24]
+
+  # Workload VM on the emulated LAN
+  vms:
+    onprem-vm:
+      tags: [onprem]
+      private_ip: 10.40.0.20
+
+# Public Gateways - NAT/egress + optional bastion.
+public_gateways: {}
+  # main:
+  #   name: main
+  #   type: VPC-GW-S
+  #   bastion_enabled: false
+  #   # bastion_port: 61000
+  #   # allowed_ip_ranges: [0.0.0.0/0]
+  #
+  #   gateway_networks:
+  #     hub:
+  #       vpc_key: hub
+  #       private_network_key: hub-net
+  #       enable_masquerade: true
+  #       push_default_route: true
+
+# DNS Zones & Records (optional - requires a registered domain).
+dns_zones: {}
+dns_records: {}

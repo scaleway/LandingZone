@@ -1,0 +1,199 @@
+# ===========================================================================
+# Stage 3 - Security Appliances (committed template, sanitized - no real values).
+# What this file creates: HA firewall pair (zones, IP plan, image import,
+# mgmt access, door PAT, optional test instances).
+# How to use: copy to security-appliances-<env>-demo.yaml (same folder,
+# gitignored) and fill in your values - stages prefer the -demo.* file.
+# SECRETS NEVER GO HERE (file is committed): passwords/SSH keys/S3/state
+# credentials live in the gitignored terraform.tfvars.
+# ===========================================================================
+
+# Firewall HA node zones. fw-active is the DESIGNATED CARP MASTER (best advskew,
+# fr-par-2) - the active node must live in the tenants' zone.
+zones:
+  fw-passive: fr-par-1
+  fw-active: fr-par-2
+
+# Object storage bucket used for the firewall image imports. Empty = the
+# prefix-driven default <state_bucket_prefix>-<env>-image-import-<timestamp>
+# (state_bucket_prefix default lz; the frozen bootstrap creation timestamp is
+# appended automatically, keeping the name globally unique).
+image_bucket_name: ""
+
+# Network CIDRs. hub/spokes come from Stage 2; sync + egress are owned by
+# Stage 3.
+hub_subnet_cidr: 10.10.0.0/24
+spoke1_subnet_cidr: 10.20.0.0/24
+spoke2_subnet_cidr: 10.30.0.0/24
+hub_lan_pn_key: hub-net
+ha_sync_cidr: 10.255.0.0/24
+egress_cidr: 10.4.0.0/24
+
+# ---------------------------------------------------------------------------
+# IP address plan (fixed, deterministic). Naming: .1 = reserved by Scaleway,
+# .10 = CARP VIP, .11/.12 = fw-passive/fw-active. Single source of truth for main.tf.
+# ---------------------------------------------------------------------------
+ipam:
+  lan:                # hub PN (Stage 2) - LAN side of the firewalls
+    pgw-active: 10.10.0.2    # hub PGW (inbound door) - door reply path
+    pgw-passive: 10.10.0.3  # alt hub PGW (fr-par-1) - cross-AZ door failover
+    vip: 10.10.0.10   # CARP LAN VIP (ingress next-hop + SNAT target)
+    fw-passive: 10.10.0.11
+    fw-active: 10.10.0.12
+    hub_test: 10.10.0.7  # hub-test agent LAN IP - pinned static
+  spoke1:             # spoke-1 PN (Stage 2) - spoke test agent
+    test: 10.20.0.5
+  spoke2:             # spoke-2 PN (Stage 2) - spoke test agent
+    test: 10.30.0.4
+  sync:               # sync VPC/PN (Stage 3) - pfsync + XMLRPC
+    fw-passive: 10.255.0.11
+    fw-active: 10.255.0.12
+  egress:             # egress VPC/PN (Stage 3) - WAN side
+    pgw-active: 10.4.0.2     # egress PGW (masquerades all egress)
+    pgw-passive: 10.4.0.3 # alt egress PGW (fr-par-1) - cross-AZ egress failover
+    vip: 10.4.0.10    # CARP egress VIP (SNAT target + nexthop)
+    fw-passive: 10.4.0.11
+    fw-active: 10.4.0.12
+  vhids:
+    lan: 10
+    egress: 11
+  vmacs:
+    lan: "00:00:5e:00:01:0a"
+    egress: "00:00:5e:00:01:0b"
+  vpn_client_cidr: 192.168.5.0/24   # optional managed VPN client network (see flag below)
+
+# Firewall instance type (both nodes).
+fw_instance_type: POP2-2C-8G
+
+# Source CIDRs allowed to manage the OPNsense WebUI + SSH through the hub
+# door. Replace the example addresses with your own operator IPs.
+
+# NEVER use 0.0.0.0/0 here: it renders a /0 reply route via the hub PGW that
+# collides with the system default route (egress PGW). The two /0s fight and
+# the kernel default gets pinned to the hub, FW-own egress then rides the
+# hub public IP instead of the egress masquerade. 
+# Pin concrete CIDRsc(operator /32 or office range): the reply route stays per-CIDR via the hub
+# and the system default stays on egress.
+management_cidrs:
+  - 198.51.100.10/32
+  - 198.51.100.11/32
+
+# Hub door PAT rules - public ingress ports -> private LAN IPs via the hub
+# gateway. `target` is a key of ipam.lan (vip | fw-passive | fw-active). Defaults:
+# webui 8443/8444/8445 => 443, ssh 8022/8023 => 22. Change ports/targets here;
+# add/remove a rule in main.tf.
+door_pat_rules:
+  webui_vip:
+    target: vip
+    private_port: 443
+    public_port: 8443
+  webui_fw_passive:
+    target: fw-passive
+    private_port: 443
+    public_port: 8444
+  webui_fw_active:
+    target: fw-active
+    private_port: 443
+    public_port: 8445
+  ssh_fw_passive:
+    target: fw-passive
+    private_port: 22
+    public_port: 8022
+  ssh_fw_active:
+    target: fw-active
+    private_port: 22
+    public_port: 8023
+
+# Firewall vendor add-on to deploy. Only `opnsense` is wired end-to-end today.
+firewall_provider: opnsense
+
+# Feature flags.
+enable_spoke_asymmetric_rules: true  # spoke-1 -> spoke-2 allowed, reverse blocked
+enable_connectivity_spoke: false     # optional managed S2S VPN client network - OFF
+enable_egress_carp_vip: true         # egress 10.4.0.10 VIP as SNAT source
+create_firewall_mgmt_sg: true        # dedicated management security group
+create_default_routes: false         # Stage 3 wires its own routes (spokes -> hub)
+
+# ---------------------------------------------------------------------------
+# Firewall image import - QCOW2 -> object storage -> SBS snapshots -> SBS
+# volumes. Deploy-from-golden: source_url points at the PUBLIC golden image
+# bucket; the upload-wait gate fetches it (curl) and auto-uploads to the image
+# bucket before importing per-zone SBS snapshots (enable_upload=false then
+# skips download/convert in the module itself - the gate does the fetch).
+# A bundled file at providers/opnsense/opnsense-central-fw.qcow2 wins over
+# source_url (no re-download).
+#
+# The S3 write credentials (upload_access_key / upload_secret_key) are NOT
+# here - they come from the gitignored terraform.tfvars.
+# ---------------------------------------------------------------------------
+firewall_image_1:
+  vendor: opnsense
+  version: "26.1"
+  zones:
+    - fr-par-1
+  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw.qcow2
+  source_format: qcow2
+  object_key: opnsense-central-fw.qcow2
+  s3_endpoint: https://s3.fr-par.scw.cloud
+  snapshot_size: 25
+  enable_upload: false
+  force_download: false
+  force_upload: false
+
+firewall_image_2:
+  vendor: opnsense
+  version: "26.1"
+  zones:
+    - fr-par-2
+  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw.qcow2
+  source_format: qcow2
+  object_key: opnsense-central-fw.qcow2
+  s3_endpoint: https://s3.fr-par.scw.cloud
+  snapshot_size: 25
+  enable_upload: false
+  force_download: false
+  force_upload: false
+
+# ---------------------------------------------------------------------------
+# Test instances - lightweight VMs in hub/spoke VPCs validating peering and
+# firewall policy (millisecond ping both directions = hub-direct east-west).
+# Delete or empty this section if you don't want the test agents.
+# ---------------------------------------------------------------------------
+create_test_instances: true
+
+test_instances:
+  hub-test:
+    name: hub-test
+    vpc_key: hub
+    private_network_key: hub-net
+    instance_type: DEV1-S
+    image: ubuntu_jammy
+    security_group_key: internal-sg
+    ips: {}
+    tags:
+      - test
+      - hub
+  spoke-1-test:
+    name: spoke-1-test
+    vpc_key: spoke-1
+    private_network_key: spoke-1-net
+    instance_type: DEV1-S
+    image: ubuntu_jammy
+    security_group_key: internal-sg
+    ips:
+      public: {}
+    tags:
+      - test
+      - spoke-1
+  spoke-2-test:
+    name: spoke-2-test
+    vpc_key: spoke-2
+    private_network_key: spoke-2-net
+    instance_type: DEV1-S
+    image: ubuntu_jammy
+    security_group_key: internal-sg
+    ips:
+      public: {}
+    tags:
+      - test
+      - spoke-2

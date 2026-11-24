@@ -1,0 +1,34 @@
+%%{init: {"theme": "base", "themeVariables": {
+  "fontFamily": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif",
+  "fontSize": "13px"
+}}}%%
+%% CARP failover, HA firewall pair (vhid 10 LAN VIP 10.10.0.10 / vhid 11 egress VIP 10.4.0.10)
+%% Both vhids float together as a pair: whichever node is MASTER owns both VIPs.
+%% Steady state: fw-active MASTER (advskew 0), fw-passive STANDBY (advskew 100).
+%% Recovery (preempt) verified in the field: fw-active auto-claims MASTER back on restart.
+sequenceDiagram
+    participant P1 as fw-passive (fr-par-1, STANDBY)
+    participant P2 as fw-active (fr-par-2, MASTER)
+    participant VR as vRouter (hub route 0.0.0.0/0 -> VIP)
+    participant IP as IPAM (VPC route nexthop = VIP; ARP resolved via CARP VMAC 00:00:5e:00:01:0a/0b)
+
+    Note over P1,P2: CARP heartbeat over sync PN (10.255.0.0/24); vhid 10 + 11 fail over together
+    loop steady state
+        P2-->>P1: CARP advertisement (vhid 10 + vhid 11, 1s interval)
+        VR->>VR: route nexthop = VIP (IPAM id, never changes)
+    end
+
+    Note over P2: failover: fw-active goes down
+    P1->>P1: 3 missed advertisements (~3s timeout)
+    P1->>P1: claims MASTER for vhid 10 + 11, holds both VIPs + VMACs
+    P1-->>VR: GARP (VIP -> VMAC now on fw-passive ifaces)
+    VR->>VR: ARP cache updated (route nexthop unchanged)
+    Note over VR: LAN + egress traffic now lands on fw-passive
+
+    Note over P2: recovery: fw-active comes back (CARP preempt, verified this week)
+    P2-->>P1: resumes CARP advertisements (advskew 0 = higher priority)
+    P1->>P1: yields MASTER after preemption delay
+    P2->>P2: re-claims MASTER for vhid 10 + 11, takes back both VIPs + VMACs
+    P2-->>VR: GARP again (VIP -> VMAC back on fw-active ifaces)
+    VR->>VR: ARP cache updated again (route nexthop unchanged)
+    Note over VR: traffic automatically returns to fw-active

@@ -1,0 +1,31 @@
+# samples/authentik-sso - terraform.tfvars.sample
+# Copy to terraform.tfvars, fill in, then init/plan/apply.
+# Secrets (bootstrap token etc.) are auto-generated; the SCW-side values come
+# from your bootstrap run and are only needed for the IdP registration step.
+
+organization_id = "11111111-1111-1111-1111-111111111111"
+project_id      = null                  # or an existing project ID
+region          = "fr-par"
+zone            = "fr-par-2"
+
+# name_prefix       = "lz-authentik-sso"
+# environment       = "sample"          # env:<value> resource tag (dev/prod/sandbox/...)
+# instance_type     = "DEV1-S"           # 2 vCPU / 2 GB minimum
+# image             = "ubuntu-noble"
+# root_volume_size_gb = 50
+
+# CIDRs: allowed_cidrs is PUBLIC-BY-DESIGN for the IdP HTTPS login (SAML needs
+# end-user browsers) - 0.0.0.0/0 is legitimate there, restrict only if the IdP
+# is internal-only. ssh_cidrs is the MANAGEMENT plane - NEVER 0.0.0.0/0, pin
+# your operator /32 or office range.
+# allowed_cidrs     = ["0.0.0.0/0"]      # HTTPS/HTTP toward the IdP (public SAML login)
+# ssh_cidrs         = ["198.51.100.10/32"]  # operator egress / office range - never 0.0.0.0/0
+
+authentik_fqdn     = "auth.example.com"  # point DNS at the instance public IP
+# authentik_image_tag = "2026.8.3"
+# bootstrap_email   = "admin@example.com"
+# application_slug  = "scaleway"
+
+# From your bootstrap run (`terraform output -json sso`):
+# sp_entity_id = "https://iam...entity-id..."
+# sp_acs_url   = "https://iam...acs-url..."

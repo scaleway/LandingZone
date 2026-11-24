@@ -1,0 +1,5 @@
+# Drill artifacts are sensitive (the restored DR firewall config contains the
+# CARP password + SSH public keys; the probe carries the backup private key in
+# a secret env var at apply time). Never commit them.
+restore/
+*.tfvars

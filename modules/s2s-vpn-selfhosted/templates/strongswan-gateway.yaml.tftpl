@@ -1,0 +1,187 @@
+#cloud-config
+# ---------------------------------------------------------------------------
+# Self-hosted S2S VPN gateway -- strongSwan (IKEv2/IPSec) + BIRD2 (BGP)
+# Rendered by modules/s2s-vpn-selfhosted. The instance plays the "customer
+# gateway" role of a Site-to-Site VPN: it dials the managed VPN gateway over
+# IKEv2 and exchanges routes with it over BGP on a mark/VTI tunnel interface.
+#
+# Tunnel data plane:
+#   vti0 (key 42) carries the BGP + payload traffic; BIRD peers on
+#   169.254.0.0/30 inside the tunnel. BGP learns the cloud CIDRs from the
+#   managed gateway (route propagation) and announces this site's networks
+#   (the advertise_cidrs, which live on the private NIC).
+#
+# The PSK and the remote public IP/ASN are injected at render time (see the
+# module), so the gateway comes up fully declarative -- no post-apply
+# remote-exec.
+# ---------------------------------------------------------------------------
+
+# Install strongSwan (the set documented by Scaleway for their managed VPN
+# gateway) and BIRD2 for the BGP session over the tunnel.
+packages:
+  - strongswan
+  - strongswan-pki
+  - libstrongswan-standard-plugins
+  - libstrongswan-extra-plugins
+  - strongswan-libcharon
+  - bird2
+
+# Optional operator access: SSH keys injected at first boot. Keep empty for
+# air-gapped-style gateways (bare instances, only tunnel + ICMP exposed).
+%{ if length(ssh_keys) > 0 }
+users:
+  - name: lzops
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+%{ for key in ssh_keys }
+      - ${key}
+%{ endfor }
+%{ endif }
+
+write_files:
+  - path: /etc/sysctl.d/99-lz-vpn-forward.conf
+    content: |
+      net.ipv4.ip_forward = 1
+      net.ipv4.conf.all.forwarding = 1
+      net.ipv4.conf.default.forwarding = 1
+
+  # strongSwan tuning: with a mark/VTI tunnel the daemon must NOT install its
+  # own routes (BIRD owns the routing table), the connmark plugin must stay
+  # disabled (it inserts mangle rules that break VTI tunnels), and filelog
+  # keeps charon's diagnostics on disk for troubleshooting.
+  - path: /etc/strongswan.d/99-lz-vpn.conf
+    content: |
+      charon {
+          install_routes = no
+          filelog {
+              charon {
+                  path = /var/log/charon.log
+                  time_format = %b %e %T
+                  ike = 2
+                  knl = 2
+                  cfg = 2
+                  dmn = 1
+              }
+          }
+          plugins {
+              connmark {
+                  load = no
+              }
+          }
+      }
+
+  - path: /etc/ipsec.conf
+    content: |
+      config setup
+          strictcrlpolicy=no
+
+      conn lz-tunnel
+          type=tunnel
+          keyexchange=ikev2
+          authby=secret
+          left=${local_public_ip}
+          leftid=${local_public_ip}
+          leftsubnet=0.0.0.0/0
+          right=${remote_public_ip}
+          rightid=${remote_public_ip}
+          rightsubnet=0.0.0.0/0
+          ike=${ike_ciphers}
+          esp=${esp_ciphers}
+          mark=${vti_mark}
+          install_routes=no
+          auto=start
+          dpdaction=restart
+          mobike=no
+          keyingtries=%forever
+
+  - path: /etc/ipsec.secrets
+    content: |
+      %any %any : PSK "${psk}"
+
+  # The VTI interface must exist before (and independently of) the SA; a
+  # oneshot unit creates it at boot and tears it down on stop. disable_policy
+  # avoids duplicate SPD lookups on packets routed into the tunnel.
+  - path: /etc/systemd/system/lz-vti.service
+    content: |
+      [Unit]
+      Description=Landing-zone S2S VTI tunnel interface
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/sbin/ip link add ${tunnel_interface} type vti local ${local_public_ip} remote ${remote_public_ip} key ${vti_mark}
+      ExecStart=/usr/sbin/ip addr add ${local_tunnel_ip} dev ${tunnel_interface}
+      ExecStart=/usr/sbin/ip link set ${tunnel_interface} up
+      ExecStart=/usr/sbin/sysctl -w net.ipv4.conf.${tunnel_interface}.disable_policy=1
+      ExecStop=/usr/sbin/ip link del ${tunnel_interface}
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/bird/bird.conf
+    content: |
+      # BIRD2 -- BGP peering with the managed VPN gateway over the VTI tunnel.
+      router id ${router_id};
+
+      protocol device {}
+
+      # The on-prem LANs are announced via a static blackhole route: real
+      # forwarding stays on the kernel's directly-connected routes, and these
+      # routes only exist so BGP has something to advertise.
+      protocol static lz_lan {
+      %{ for cidr in advertise_cidrs }
+          route ${cidr} blackhole;
+      %{ endfor }
+          ipv4 {};
+      }
+
+      protocol kernel {
+          scan time 10;
+          learn;
+          ipv4 {
+              import all;
+              # Never re-install BIRD's announcement-only (blackhole /
+              # unreachable / prohibit) routes into the kernel -- they would
+              # shadow the real directly-connected routes.
+              export filter {
+                  if dest ~ [ RTD_BLACKHOLE, RTD_UNREACHABLE, RTD_PROHIBIT ] then reject;
+                  accept;
+              };
+          };
+      }
+
+      # Only the on-premises networks are announced to the VPN gateway. The
+      # cloud CIDRs learned over BGP are never re-advertised (no loops).
+      filter lz_export {
+      %{ for cidr in advertise_cidrs }
+          if net = ${cidr} then accept;
+      %{ endfor }
+          reject;
+      }
+
+      protocol bgp lz_vgw {
+          local ${local_bgp_ip} as ${local_asn};
+          neighbor ${remote_tunnel_ip} as ${remote_asn};
+          ipv4 {
+              import all;
+              export filter lz_export;
+          };
+          graceful restart off;
+      }
+
+runcmd:
+  - sysctl --system
+  - systemctl enable --now lz-vti.service
+  # Static safety-net routes: reach the cloud CIDRs via the tunnel even while
+  # BGP is still converging (idempotent).
+%{ for cidr in learn_cidrs }
+  - ip route add ${cidr} via ${remote_tunnel_ip} dev ${tunnel_interface} proto static || true
+%{ endfor }
+  - systemctl enable --now strongswan-starter
+  - systemctl enable --now bird
+  - systemctl restart bird || true
+  - systemctl restart strongswan-starter || true

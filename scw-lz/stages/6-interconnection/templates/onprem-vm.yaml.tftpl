@@ -1,0 +1,19 @@
+#cloud-config
+# Lab workload VM -- cloud routes via the on-prem gateway + operator key.
+# The onprem VPC advertises its cloud routes by DHCP only to the gateway NIC,
+# so each VM needs these explicit routes to reach the hub over the tunnel.
+# Idempotent (`|| true`); re-applied at every boot.
+users:
+  - name: lzops
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+%{ for key in operator_keys }
+      - ${key}
+%{ endfor }
+
+runcmd:
+%{ for cidr in cloud_cidrs }
+  - ip route add ${cidr} via ${gateway_ip} || true
+%{ endfor }

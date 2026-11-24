@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# Stage 6, Interconnection: Sample Terraform Variables
+# Copy this sample to: scw-lz/envs/<env>/6-interconnection-<env>.tfvars
+# Resource definitions (S2S VPN connections, on-premises lab) are REUSED from
+# Stage 2's factory: envs/<env>/data/networking-<env>.yaml
+# You can override the S2S VPN connections by setting the same map keys in
+# this file, as these take precedence over the YAML data.
+# ---------------------------------------------------------------------------
+
+organization_id = "YOUR_ORG_ID"
+region          = "fr-par"
+zone            = "fr-par-2"
+
+# Which project from Stage 0 to deploy interconnection resources into
+project_key = "dev"
+
+# NOTE: the remote state backend is NOT set here - it comes from the
+# bootstrap-generated envs/<env>/backend-<env>.tfvars + remote_state-<env>.tfvars
+# (loaded automatically by scripts/apply.sh).
+
+# ---------------------------------------------------------------------------
+# Optional: Override S2S VPN connections from the YAML factory
+# Uncomment and modify to override a single connection, for example:
+# s2s_vpn_connections = {
+#   on-prem-to-hub = {
+#     vpc_key             = "hub"
+#     private_network_key = "hub-net"
+#     customer_ipv4_public = "203.0.113.1"
+#     customer_asn         = 65000
+#     prefix_filter_in     = ["10.40.0.0/24"]
+#     prefix_filter_out    = ["10.10.0.0/24", "10.20.0.0/24", "10.30.0.0/24"]
+#   }
+# }
+# ---------------------------------------------------------------------------

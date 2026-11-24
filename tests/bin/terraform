@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake terraform for offline driver tests (tests/test_driver.sh).
+# Records every invocation (cwd + args) to $TF_LOG -- no cloud, no state.
+{
+  echo "cwd=$(pwd)"
+  printf '%s\n' "$@"
+  echo "---"
+} >> "${TF_LOG:?TF_LOG not set}"

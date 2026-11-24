@@ -1,0 +1,13 @@
+# ---------------------------------------------------------------------------
+# Stage 1, Security: Sample Terraform Variables
+# Copy this sample to: scw-lz/envs/<env>/1-security-<env>.tfvars
+# Resource definitions (IAM policies, cockpit, KMS, secrets, security groups)
+# live in: envs/<env>/data/security-<env>.yaml
+# You can override any resource by setting the same map keys in this file,
+# as these take precedence over the YAML data.
+# ---------------------------------------------------------------------------
+
+organization_id = "YOUR_ORG_ID"
+project_key     = "dev"
+region          = "fr-par"
+zone            = "fr-par-2"

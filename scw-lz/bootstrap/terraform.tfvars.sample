@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# Bootstrap Stage, Sample Terraform Variables
+# This stage creates the foundational resources for the landing zone.
+# It uses LOCAL state (it's the seed for all other stages).
+# ---------------------------------------------------------------------------
+
+organization_id = "YOUR_ORG_ID"
+project_id      = "YOUR_DEFAULT_PROJECT_ID"  # optional, defaults to org-level
+region          = "fr-par"
+zone            = "fr-par-2"
+environment     = "dev"
+
+# State bucket options
+# REQUIRED user prefix for bootstrap-named buckets (state, audit,
+# image-import, backup/DR). Bucket names must be globally unique; a frozen
+# creation timestamp is appended automatically, so names become
+# <prefix>-<env>-<purpose>-<timestamp> (e.g. lz-myorg-dev-backup-20261113t091500z -
+# lowercased so the bucket name is S3-valid).
+state_bucket_prefix     = "lz-myorg"
+enable_state_lock       = true
+state_retention_days    = 365
+enable_state_sse        = true
+
+# Project naming: <project_prefix>-<env> (landing zone) and
+# <project_prefix>-<env>-infra-ops (infra-ops project). Default "lz" keeps the
+# historical names (lz-dev, lz-dev-infra-ops); set your own company prefix to
+# namespace projects in multi-customer orgs.
+project_prefix = "lz"
+
+# Local SSH key storage (managed by this stage, deleted on destroy).
+# Per-env convention: ../keys-<env> (dev -> ../keys-dev, prod -> ../keys-prod)
+# so test-firewalls.sh and stages 3/5 resolve the same location.
+ssh_key_dir = "../keys-dev"
+
+# API key expiration (null = never expires)
+api_key_expires_at = null

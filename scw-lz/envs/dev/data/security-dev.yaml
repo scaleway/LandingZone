@@ -1,0 +1,133 @@
+# ===========================================================================
+# Stage 1 - Security (committed template, sanitized - no real values).
+# What this file creates: Cockpit (metrics/logs/traces), KMS keys, secrets,
+# and security groups.
+# How to use: copy to security-<env>-demo.yaml (same folder, gitignored) and
+# fill in your values - stages prefer the -demo.* file when present.
+# ===========================================================================
+
+# Cockpit (observability) - each key defines one Cockpit instance.
+cockpit:
+  main:
+    name: main
+    sources:
+      metrics:
+        name: metrics
+        type: metrics
+        retention_days: 30
+      logs:
+        name: logs
+        type: logs
+        retention_days: 30
+      traces:
+        name: traces
+        type: traces
+        retention_days: 15
+    tokens:
+      write_token:
+        name: write-all
+        scopes:
+          write_metrics: true
+          write_logs: true
+          write_traces: true
+      read_token:
+        name: read-all
+        scopes:
+          query_metrics: true
+          query_logs: true
+          query_traces: true
+          write_metrics: false
+          write_logs: false
+          write_traces: false
+
+
+# KMS Keys - Customer-managed encryption
+kms_keys:
+  security:
+    name: security
+    description: KMS key for security-related encryption (secrets, audit)
+    unprotected: true
+
+
+# Secrets
+secrets:
+  cockpit-write-token:
+    name: cockpit-write-token
+    description: Cockpit write token for ingestion
+
+
+# Security Groups
+# Instance SGs are zone-scoped: security_groups_az1_zone mirrors every group
+# into a second zone (AZ1, where firewall fw-passive lives). Empty = no duplicates.
+# This factory key wins over the tfvars fallback when both are set.
+security_groups_az1_zone: fr-par-1
+security_groups:
+  bastion-sg:
+    name: bastion-sg
+    description: Security group for bastion/management access
+    inbound_default_policy: drop
+    outbound_default_policy: accept
+    inbound_rules:
+      - action: accept
+        protocol: TCP
+        port: 22
+        ip_range: 0.0.0.0/0
+
+  web-sg:
+    name: web-sg
+    description: Security group for web servers (HTTP/HTTPS)
+    inbound_default_policy: drop
+    outbound_default_policy: accept
+    inbound_rules:
+      - action: accept
+        protocol: TCP
+        port: 80
+        ip_range: 0.0.0.0/0
+      - action: accept
+        protocol: TCP
+        port: 443
+        ip_range: 0.0.0.0/0
+
+  internal-sg:
+    name: internal-sg
+    description: Security group for internal services
+    inbound_default_policy: accept
+    outbound_default_policy: accept
+    inbound_rules:
+      - action: accept
+        protocol: ICMP
+        ip_range: 0.0.0.0/0
+      - action: accept
+        protocol: TCP
+        port_range: "1-65535"
+        ip_range: 0.0.0.0/0
+    outbound_rules:
+      - action: accept
+        protocol: ICMP
+        ip_range: 0.0.0.0/0
+      - action: accept
+        protocol: TCP
+        port_range: "1-65535"
+        ip_range: 0.0.0.0/0
+
+  firewall-sg:
+    name: firewall-sg
+    description: Security group for firewall appliance VMs
+    inbound_default_policy: accept
+    outbound_default_policy: accept
+    inbound_rules:
+      - action: accept
+        protocol: ICMP
+        ip_range: 0.0.0.0/0
+      - action: accept
+        protocol: TCP
+        port_range: "1-65535"
+        ip_range: 0.0.0.0/0
+    outbound_rules:
+      - action: accept
+        protocol: ICMP
+        ip_range: 0.0.0.0/0
+      - action: accept
+        protocol: TCP
+        port_range: "1-65535"
+        ip_range: 0.0.0.0/0

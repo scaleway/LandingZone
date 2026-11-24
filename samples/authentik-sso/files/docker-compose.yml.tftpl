@@ -1,0 +1,73 @@
+## Authentik (single-node IdP) - rendered by terraform, deployed via cloud-init.
+## Official stack: server + worker + embedded PostgreSQL 16 + Redis 7.
+## Ports: host 80 -> 9000 (http), host 443 -> 9443 (https, self-signed).
+services:
+  postgresql:
+    image: docker.io/library/postgres:16-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d authentik -U authentik"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      POSTGRES_PASSWORD: ${postgres_password}
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+    volumes:
+      - pg:/var/lib/postgresql/data
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    command: --save 60 1 --loglevel warning
+    volumes:
+      - redis:/data
+
+  server:
+    image: ghcr.io/goauthentik/server:${image_tag}
+    restart: unless-stopped
+    command: server
+    ports:
+      - "80:9000"
+      - "443:9443"
+    environment:
+      AUTHENTIK_DEBUG: "false"
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${postgres_password}
+      AUTHENTIK_SECRET_KEY: ${secret_key}
+      AUTHENTIK_URL: https://${fqdn}
+      # First-boot bootstrap: akadmin user + a one-shot recovery token.
+      AUTHENTIK_BOOTSTRAP_TOKEN: ${bootstrap_token}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${bootstrap_email}
+    volumes:
+      - media:/media
+      - custom-templates:/templates
+      - certs:/certs
+
+  worker:
+    image: ghcr.io/goauthentik/server:${image_tag}
+    restart: unless-stopped
+    command: worker
+    environment:
+      AUTHENTIK_DEBUG: "false"
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${postgres_password}
+      AUTHENTIK_SECRET_KEY: ${secret_key}
+      AUTHENTIK_URL: https://${fqdn}
+    volumes:
+      - media:/media
+      - certs:/certs
+
+volumes:
+  pg:
+  redis:
+  media:
+  custom-templates:
+  certs:

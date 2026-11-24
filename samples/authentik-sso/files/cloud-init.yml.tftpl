@@ -1,0 +1,16 @@
+#cloud-config
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+
+write_files:
+  - path: /opt/authentik/docker-compose.yml
+    encoding: b64
+    content: |
+      ${compose_b64}
+
+runcmd:
+  - systemctl enable --now docker
+  - cd /opt/authentik && docker compose up -d
+  - mkdir -p /opt/authentik/.provisioned

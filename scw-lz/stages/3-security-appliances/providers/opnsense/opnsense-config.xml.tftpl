@@ -1,0 +1,786 @@
+<?xml version="1.0"?>
+<!-- Hub/spoke OPNsense configuration, rendered once per HA node. -->
+<opnsense>
+  <theme>opnsense</theme>
+  <sysctl version="1.0.2">
+    <item uuid="b1752c3d-11e2-4d2b-c3db-fc2bacde6f93">
+      <tunable>kern.ipc.maxsockbuf</tunable>
+      <value>33554432</value>
+      <descr>Maximum socket buffer size</descr>
+    </item>
+  </sysctl>
+
+  <system>
+    <serialspeed>115200</serialspeed>
+    <primaryconsole>serial</primaryconsole>
+    <optimization>normal</optimization>
+    <hostname>${hostname}</hostname>
+    <domain>localdomain</domain>
+    <dnsserver>1.1.1.1</dnsserver>
+    <dnsallowoverride>1</dnsallowoverride>
+    <timezone>Europe/Paris</timezone>
+    <timeservers>0.opnsense.pool.ntp.org 1.opnsense.pool.ntp.org</timeservers>
+    <language>en_US</language>
+    <prefer_ipv4>1</prefer_ipv4>
+
+    <!-- Management over SSH (key-only) on LAN only: the firewalls are
+         private-only, reached exclusively through the hub inbound door
+         (hub PGW PAT -> LAN).
+
+         sshd key-only gotcha (proven on-box): OPNsense's
+         openssh_configure_do() tests isset() on ssh.passwordauth, NOT its
+         value — a present <passwordauth> element (even "0") renders
+         "PasswordAuthentication yes". The element MUST be omitted entirely
+         to render "PasswordAuthentication no". -->
+    <ssh>
+      <group>admins</group>
+      <enabled>enabled</enabled>
+      <interfaces>lan</interfaces>
+      <permitrootlogin>1</permitrootlogin>
+      <port>22</port>
+    </ssh>
+
+    <webgui>
+      <protocol>https</protocol>
+      <port/>
+      <interfaces>lan</interfaces>
+      <nohttpreferercheck>1</nohttpreferercheck>
+    </webgui>
+
+    <group uuid="6dcc1e72-4481-5cf0-96d5-f30d9242f78b">
+      <gid>1999</gid>
+      <name>admins</name>
+      <scope>system</scope>
+      <description>System Administrators</description>
+      <priv>page-all</priv>
+      <member>0</member>
+    </group>
+
+    <user uuid="3a41ddf3-6129-57f0-9c47-46d8ed65539f">
+      <uid>0</uid>
+      <name>root</name>
+      <disabled>0</disabled>
+      <scope>system</scope>
+      <password>${opnsense_root_password_hash}</password>
+      <authorizedkeys>${authorizedkeys_b64}</authorizedkeys>
+      <priv/>
+    </user>
+
+    <firmware version="1.0.1">
+      <mirror/>
+      <flavour/>
+      <plugins/>
+      <type/>
+    </firmware>
+
+    <disableconsolemenu>0</disableconsolemenu>
+    <usevirtualterminal>1</usevirtualterminal>
+    <disablenatreflection>yes</disablenatreflection>
+    <pf_share_forward>1</pf_share_forward>
+    <!-- FW-own default = EGRESS_PGW_ACTIVE (26.1 picks it via <defaultgw>, not defaultgw4). -->
+    <defaultgw4>EGRESS_PGW_ACTIVE</defaultgw4>
+  </system>
+
+  <interfaces>
+    <!-- vtnet0 carries no public IP. ipaddr=none (not dhcp) - a stale DHCP
+         lease would resurrect WAN_DHCP and compete with the default. -->
+    <wan>
+      <if>vtnet0</if>
+      <descr>WAN (Scaleway mgmt)</descr>
+      <enable>1</enable>
+      <ipaddr>none</ipaddr>
+      <blockpriv>0</blockpriv>
+      <blockbogons>0</blockbogons>
+    </wan>
+
+    <!-- LAN carries the CARP VIP and the management (door) reply routes. The
+         node IP is STATIC (${fw_lan_ip}) - DHCP relies on the PN DHCP honoring
+         the per-MAC IPAM reservation, which is fragile: a LAN DHCP lease can
+         grab the CARP VIP instead of the node IP (observed: fw-active grabbed
+         10.10.0.10 instead of 10.10.0.12, killing the door PAT to :8023/:8445). -->
+    <lan>
+      <if>vtnet1</if>
+      <descr>LAN (pn-hub)</descr>
+      <enable>1</enable>
+      <ipaddr>${fw_lan_ip}</ipaddr>
+      <subnet>24</subnet>
+    </lan>
+
+    <opt1>
+      <if>vtnet2</if>
+      <descr>sync</descr>
+      <enable>1</enable>
+      <ipaddr>${fw_sync_ip}</ipaddr>
+      <subnet>24</subnet>
+    </opt1>
+
+    <!-- opt2 = WAN/egress NIC (vtnet3) on the egress PN. Static
+         per-node IP (${fw_wan_ip}) - no DHCP dependency. Spoke egress is
+         policy-routed out this NIC (route-to EGRESS_GROUP + SNAT to the
+         egress VIP); FW-own traffic uses the EGRESS_PGW_ACTIVE system default. -->
+    <opt2>
+      <if>vtnet3</if>
+      <descr>opt2 (pn-egress)</descr>
+      <enable>1</enable>
+      <ipaddr>${fw_wan_ip}</ipaddr>
+      <subnet>24</subnet>
+    </opt2>
+
+    <lo0>
+      <internal_dynamic>1</internal_dynamic>
+      <descr>Loopback</descr>
+      <enable>1</enable>
+      <if>lo0</if>
+      <ipaddr>127.0.0.1</ipaddr>
+      <subnet>8</subnet>
+      <type>none</type>
+      <virtual>1</virtual>
+    </lo0>
+  </interfaces>
+
+  <!-- CARP VIP on the hub LAN. -->
+  <virtualip version="1.0.1">
+    <vip uuid="7796d8e2-a39b-5775-b7c3-1b4659c2d148">
+      <interface>lan</interface>
+      <mode>carp</mode>
+      <subnet>${fw_vip}</subnet>
+      <subnet_bits>24</subnet_bits>
+      <gateway/>
+      <noexpand>0</noexpand>
+      <nobind>0</nobind>
+      <password>${carp_password}</password>
+      <vhid>${carp_vhid}</vhid>
+      <advbase>1</advbase>
+      <advskew>${carp_advskew}</advskew>
+      <peer>${carp_peer}</peer>
+      <peer6/>
+      <nosync>0</nosync>
+      <descr>Hub LAN CARP VIP</descr>
+    </vip>
+    <!-- Egress CARP VIP on opt2 (WAN side). Distinct vhid (11) from
+         the LAN VIP (10) so both groups stay independent — same vhid on two
+         interfaces makes CARP groups fight (observed split-brain). -->
+    <vip uuid="7796d8e2-a39b-5775-b7c3-1b4659c2d149">
+      <interface>opt2</interface>
+      <mode>carp</mode>
+      <subnet>${egress_vip}</subnet>
+      <subnet_bits>24</subnet_bits>
+      <gateway/>
+      <noexpand>0</noexpand>
+      <nobind>0</nobind>
+      <password>${carp_password}</password>
+      <vhid>${carp_vhid_egress}</vhid>
+      <advbase>1</advbase>
+      <advskew>${carp_advskew}</advskew>
+      <peer>${carp_peer_egress}</peer>
+      <peer6/>
+      <nosync>0</nosync>
+      <descr>Egress CARP VIP</descr>
+    </vip>
+  </virtualip>
+
+  <!-- pfsync state and XMLRPC configuration sync. -->
+  <hasync version="1.0.2">
+    <disablepreempt>0</disablepreempt>
+    <disconnectppps>0</disconnectppps>
+    <pfsyncinterface>opt1</pfsyncinterface>
+    <pfsyncpeerip>${pfsync_peer}</pfsyncpeerip>
+    <pfsyncversion>1400</pfsyncversion>
+    <synchronizetoip>${xmlrpc_sync_to}</synchronizetoip>
+    <verifypeer>0</verifypeer>
+    <username>root</username>
+    <password>${opnsense_root_password}</password>
+    <syncitems>aliases,dhcpd,rules,nat,virtualip,webgui</syncitems>
+  </hasync>
+
+  <!-- Private-only nodes: vtnet0 = ipaddr=none (no WAN_DHCP). FW-own default
+       = EGRESS_PGW_ACTIVE (via <defaultgw> below); hub PGW serves only the mgmt
+       reply routes below. Gateway monitors enabled (probe = PGW LAN IP). -->
+  <gateways>
+    <defaultgw4>EGRESS_PGW_ACTIVE</defaultgw4>
+    <gateway_item uuid="c0000001-0000-0000-0000-000000000001">
+      <interface>lan</interface>
+      <gateway>${hub_gateways[0]}</gateway>
+      <name>HUB_PGW_ACTIVE</name>
+      <weight>1</weight>
+      <ipprotocol>inet</ipprotocol>
+      <interval>0</interval>
+      <monitor_disable>0</monitor_disable>
+      <monitor>${hub_gateways[0]}</monitor>
+      <descr>Hub PGW - primary door (PAT) reply gateway for management CIDRs</descr>
+    </gateway_item>
+%{ if length(hub_gateways) > 1 ~}
+    <gateway_item uuid="c0000001-0000-0000-0000-000000000004">
+      <interface>lan</interface>
+      <gateway>${hub_gateways[1]}</gateway>
+      <name>HUB_PGW_PASSIVE</name>
+      <weight>1</weight>
+      <ipprotocol>inet</ipprotocol>
+      <interval>0</interval>
+      <monitor_disable>0</monitor_disable>
+      <monitor>${hub_gateways[1]}</monitor>
+      <descr>Hub PGW ALT (fr-par-1) - door failover (tier 2 of HUB_GROUP)</descr>
+    </gateway_item>
+%{ endif ~}
+    <!-- Scaleway platform PN gateway (169.254.169.254). DO NOT use as a
+         static-route gateway in this static-LAN design: the on-link /30
+         (169.254.169.252/30) that makes it reachable is only installed by
+         dhclient via option-121. With static LAN there is no dhclient on
+         vtnet1 -> the FreeBSD kernel rejects the route add ("Invalid
+         argument"), which is exactly why the spoke/client static routes below
+         must use HUB_PGW_ACTIVE (a LAN on-link IP) instead — proven on-box (route
+         add via 169.254.169.254 fails; via hub pgw LAN IP works, 0% loss).
+         The historical LAN_DHCP gateway is the same trap: OPNsense only
+         resolves it when the DHCP client reports an option-121 routers entry
+         (platform advertises spoke subnets ONLY via option-121, no option
+         routers), so under static LAN it is never in gatewaysIndexedByName()
+         either. This entry is kept only as a documented, monitor-disabled
+         reference; no static route references it. NOTE: on the hub LAN the
+         platform DHCP *does* still advertise 10.120/10.130 via
+         169.254.169.254 in option-121 (seen on-box), so a future LAN=dhcp
+         revert would just work — but that reintroduces the DHCP/CARP
+         fragility described above. -->
+    <gateway_item uuid="c0000001-0000-0000-0000-000000000003">
+      <interface>lan</interface>
+      <gateway>169.254.169.254</gateway>
+      <name>LAN_PLATFORM</name>
+      <weight>1</weight>
+      <ipprotocol>inet</ipprotocol>
+      <interval>0</interval>
+      <monitor_disable>1</monitor_disable>
+      <descr>Scaleway PN platform gateway — REFERENCE ONLY (unreachable under static LAN; spoke routes use HUB_PGW_ACTIVE)</descr>
+    </gateway_item>
+    <gateway_item uuid="c0000001-0000-0000-0000-000000000002">
+      <interface>opt2</interface>
+      <gateway>${egress_gateways[0]}</gateway>
+      <name>EGRESS_PGW_ACTIVE</name>
+      <weight>1</weight>
+      <ipprotocol>inet</ipprotocol>
+      <!-- System default in 26.1 (defaultgw4 ignored). -->
+      <defaultgw>1</defaultgw>
+      <interval>0</interval>
+      <monitor_disable>0</monitor_disable>
+      <monitor>${egress_gateways[0]}</monitor>
+      <descr>Egress PGW primary (fr-par-2) - system default (defaultgw), tier 1 of EGRESS_GROUP</descr>
+    </gateway_item>
+%{ if length(egress_gateways) > 1 ~}
+    <gateway_item uuid="c0000001-0000-0000-0000-000000000005">
+      <interface>opt2</interface>
+      <gateway>${egress_gateways[1]}</gateway>
+      <name>EGRESS_PGW_PASSIVE</name>
+      <weight>1</weight>
+      <ipprotocol>inet</ipprotocol>
+      <interval>0</interval>
+      <monitor_disable>0</monitor_disable>
+      <monitor>${egress_gateways[1]}</monitor>
+      <descr>Egress PGW ALT (fr-par-1) - tier 2 of EGRESS_GROUP (failover)</descr>
+    </gateway_item>
+%{ endif ~}
+    <!-- Failover groups, tier 1 = primary (fr-par-2), tier 2 = alt (fr-par-1);
+         auto-switch when the active member's monitor goes down. -->
+%{ if length(egress_gateways) > 1 ~}
+    <gateway_group>
+      <name>EGRESS_GROUP</name>
+      <!-- <item> format: GATEWAY|TIER -->
+      <item>EGRESS_PGW_ACTIVE|1</item>
+      <item>EGRESS_PGW_PASSIVE|2</item>
+      <trigger>down</trigger>
+      <descr>Egress failover — primary fr-par-2, alt fr-par-1</descr>
+    </gateway_group>
+%{ else ~}
+    <gateway_group/>
+%{ endif ~}
+%{ if length(hub_gateways) > 1 ~}
+    <gateway_group>
+      <name>HUB_GROUP</name>
+      <item>HUB_PGW_ACTIVE|1</item>
+      <item>HUB_PGW_PASSIVE|2</item>
+      <trigger>down</trigger>
+      <descr>Hub door failover — primary fr-par-2, alt fr-par-1</descr>
+    </gateway_group>
+%{ endif ~}
+  </gateways>
+
+  <!-- Explicit hybrid NAT is required for pf route-to on opt2:
+       - opt2 : forwarded spoke traffic -> egress CARP VIP, then masqueraded
+                to the Egress PGW public IP by the gateway network.
+       FW-own traffic egresses through the egress PGW (masqueraded by the
+       gateway network), so only the egress VIP NAT rule is used. -->
+  <nat>
+    <outbound>
+      <mode>hybrid</mode>
+      <rule>
+        <source>
+          <network>10.0.0.0/8</network>
+        </source>
+        <destination>
+          <any>1</any>
+        </destination>
+      <descr>[NAT] SRC=RFC1918 DST=INTERNET ACT=SNAT TARGET=EGRESS_VIP</descr>
+        <category/>
+        <interface>opt2</interface>
+        <tag/>
+        <tagged/>
+        <poolopts/>
+        <poolopts_sourcehashkey/>
+        <ipprotocol>inet</ipprotocol>
+        <target>${egress_vip}</target>
+        <sourceport/>
+      </rule>
+    </outbound>
+  </nat>
+
+  <!-- Floating quick rules are evaluated top-down. -->
+  <filter>
+    <rule uuid="mgmt0001-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>[MGMT] SRC=MGMT_SOURCES DST=FW_VIP PROTO=TCP PORT=443 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>0</log>
+      <source><network>MGMT_SOURCES</network></source>
+      <destination>
+        <address>${fw_vip}</address>
+        <port>443</port>
+      </destination>
+    </rule>
+
+    <rule uuid="mgmt0001-0000-0000-0000-000000000002">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>[MGMT] SRC=MGMT_SOURCES DST=fw-passive PROTO=TCP PORT=443 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>0</log>
+      <source><network>MGMT_SOURCES</network></source>
+      <destination>
+        <address>${fw_passive_lan_ip}</address>
+        <port>443</port>
+      </destination>
+    </rule>
+
+    <rule uuid="mgmt0001-0000-0000-0000-000000000003">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>[MGMT] SRC=MGMT_SOURCES DST=fw-active PROTO=TCP PORT=443 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>0</log>
+      <source><network>MGMT_SOURCES</network></source>
+      <destination>
+        <address>${fw_active_lan_ip}</address>
+        <port>443</port>
+      </destination>
+    </rule>
+
+    <rule uuid="mgmt0001-0000-0000-0000-000000000004">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>[MGMT] SRC=MGMT_SOURCES DST=fw-passive PROTO=TCP PORT=22 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>0</log>
+      <source><network>MGMT_SOURCES</network></source>
+      <destination>
+        <address>${fw_passive_lan_ip}</address>
+        <port>22</port>
+      </destination>
+    </rule>
+
+    <rule uuid="mgmt0001-0000-0000-0000-000000000005">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>[MGMT] SRC=MGMT_SOURCES DST=fw-active PROTO=TCP PORT=22 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>0</log>
+      <source><network>MGMT_SOURCES</network></source>
+      <destination>
+        <address>${fw_active_lan_ip}</address>
+        <port>22</port>
+      </destination>
+    </rule>
+
+    <rule uuid="fwback01-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>[BACKUP] SRC=FW_BACKUP_SOURCES DST=fw-passive PROTO=TCP PORT=22 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>FW_BACKUP_SOURCES</network></source>
+      <destination>
+        <address>${fw_passive_lan_ip}</address>
+        <port>22</port>
+      </destination>
+    </rule>
+
+    <rule uuid="fwback01-0000-0000-0000-000000000002">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <statetype>keep state</statetype>
+      <descr>[BACKUP] SRC=FW_BACKUP_SOURCES DST=fw-active PROTO=TCP PORT=22 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>FW_BACKUP_SOURCES</network></source>
+      <destination>
+        <address>${fw_active_lan_ip}</address>
+        <port>22</port>
+      </destination>
+    </rule>
+
+    <!-- Management is only via the hub door (PAT -> LAN, rules above on
+         interface lan): the firewalls have no routed public IP. -->
+
+%{ if enable_connectivity ~}
+    <rule uuid="e1000000-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[VPN] SRC=CLIENT DST=SPOKE_A ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>${client_cidr}</network></source>
+      <destination><network>${spoke_a_cidr}</network></destination>
+    </rule>
+
+    <rule uuid="e1000000-0000-0000-0000-000000000002">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[VPN] SRC=CLIENT DST=SPOKE_B ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>${client_cidr}</network></source>
+      <destination><network>${spoke_b_cidr}</network></destination>
+    </rule>
+
+    <rule uuid="e1000000-0000-0000-0000-000000000003">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[VPN] SRC=SPOKE_A DST=CLIENT ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>${spoke_a_cidr}</network></source>
+      <destination><network>${client_cidr}</network></destination>
+    </rule>
+
+    <!-- 4. BLOCK: Spoke B -> on-prem (client VPC / VM-cliente) — access denied -->
+    <rule uuid="e1000000-0000-0000-0000-000000000004">
+      <type>block</type>
+      <ipprotocol>inet</ipprotocol>
+      <descr>[VPN] SRC=SPOKE_B DST=CLIENT ACT=BLOCK</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>${spoke_b_cidr}</network></source>
+      <destination><network>${client_cidr}</network></destination>
+    </rule>
+%{ endif ~}
+%{ if enable_spoke_asymmetric_rules ~}
+    <!-- ================================================================= -->
+    <!-- Asymmetric east-west policy (Spoke A <-> Spoke B)                 -->
+    <!--   Spoke A -> Spoke B : ALLOWED  (unidirectional access)           -->
+    <!--   Spoke B -> Spoke A : BLOCKED  (asymmetric enforcement demo)     -->
+    <!-- Both flows transit via the Hub FW (ingress rules enforce this).   -->
+    <!-- Asymmetric east-west policy. -->
+    <rule uuid="f2000000-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[EW] SRC=SPOKE_A DST=SPOKE_B ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>${spoke_a_cidr}</network></source>
+      <destination><network>${spoke_b_cidr}</network></destination>
+    </rule>
+
+    <rule uuid="f2000000-0000-0000-0000-000000000002">
+      <type>block</type>
+      <ipprotocol>inet</ipprotocol>
+      <descr>[EW] SRC=SPOKE_B DST=SPOKE_A ACT=BLOCK</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source><network>${spoke_b_cidr}</network></source>
+      <destination><network>${spoke_a_cidr}</network></destination>
+    </rule>
+%{ endif ~}
+    <!-- Spoke Internet egress via Egress PGW (route-to on gateway: pf
+         route-to EGRESS_GROUP, SNAT to the egress VIP by the opt2 NAT rule).
+         The group fails over to the alt PGW if the primary dies. -->
+    <rule uuid="8c080001-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[EGRESS] SRC=SPOKE_A DST=INTERNET ACT=PASS VIA=EGRESS_GROUP</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source>
+        <network>${spoke_a_cidr}</network>
+      </source>
+      <destination>
+        <not>1</not>
+        <network>internal_nets</network>
+      </destination>
+      <gateway>%{ if length(egress_gateways) > 1 ~}EGRESS_GROUP%{ else ~}EGRESS_PGW_ACTIVE%{ endif ~}</gateway>
+    </rule>
+
+    <rule uuid="8c080001-0000-0000-0000-000000000002">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[EGRESS] SRC=SPOKE_B DST=INTERNET ACT=PASS VIA=EGRESS_GROUP</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source>
+        <network>${spoke_b_cidr}</network>
+      </source>
+      <destination>
+        <not>1</not>
+        <network>internal_nets</network>
+      </destination>
+      <gateway>%{ if length(egress_gateways) > 1 ~}EGRESS_GROUP%{ else ~}EGRESS_PGW_ACTIVE%{ endif ~}</gateway>
+    </rule>
+
+    <!-- Hub-test agent Internet egress via Egress PGW (same treatment as the
+         spokes: pf route-to EGRESS_GROUP, SNAT to the egress VIP by the opt2
+         NAT rule). Source is the hub-test LAN IP (keep ipam.lan.hub_test in
+         security-appliances.yaml in sync with the instance). -->
+    <rule uuid="8c080001-0000-0000-0000-000000000003">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[EGRESS] SRC=HUB_TEST DST=INTERNET ACT=PASS VIA=EGRESS_GROUP</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <interface>lan</interface>
+      <quick>1</quick>
+      <log>1</log>
+      <source>
+        <network>${hub_test_cidr}</network>
+      </source>
+      <destination>
+        <not>1</not>
+        <network>internal_nets</network>
+      </destination>
+      <gateway>%{ if length(egress_gateways) > 1 ~}EGRESS_GROUP%{ else ~}EGRESS_PGW_ACTIVE%{ endif ~}</gateway>
+    </rule>
+
+    <rule uuid="b2c3d4e5-0000-0000-0000-000000000001">
+      <type>pass</type>
+      <ipprotocol>inet</ipprotocol>
+      <statetype>keep state</statetype>
+      <descr>[MGMT] SRC=MGMT_SOURCES DST=LAN PROTO=TCP PORT=22 ACT=PASS</descr>
+      <direction>in</direction>
+      <floating>yes</floating>
+      <quick>1</quick>
+      <log>0</log>
+      <interface>lan</interface>
+      <protocol>tcp</protocol>
+      <source><network>MGMT_SOURCES</network></source>
+      <destination>
+        <network>lan</network>
+        <port>22</port>
+      </destination>
+    </rule>
+  </filter>
+
+  <!-- Mgmt reply routes pinned to real gateway HUB_PGW_ACTIVE (a gateway group name
+       is not accepted here). Failover to the alt door = manual switch to
+       HUB_PGW_PASSIVE. -->
+  <staticroutes version="1.0.0">
+    <route uuid="b2c3d4e5-0000-0000-0000-000000000010">
+      <network>${spoke_a_cidr}</network>
+      <gateway>HUB_PGW_ACTIVE</gateway>
+      <descr>Spoke A via hub PN</descr>
+      <disabled>0</disabled>
+    </route>
+    <route uuid="b2c3d4e5-0000-0000-0000-000000000011">
+      <network>${spoke_b_cidr}</network>
+      <gateway>HUB_PGW_ACTIVE</gateway>
+      <descr>Spoke B via hub PN</descr>
+      <disabled>0</disabled>
+    </route>
+%{ if enable_connectivity ~}
+    <route uuid="b2c3d4e5-0000-0000-0000-000000000013">
+      <network>${client_cidr}</network>
+      <gateway>HUB_PGW_ACTIVE</gateway>
+      <descr>Client VPC (on-prem simulation, via S2S VPN) via hub PN</descr>
+      <disabled>0</disabled>
+    </route>
+%{ endif ~}
+    <!-- Door (hub PGW PAT) reply paths, one route per management CIDR.
+         NOTE (open-management mode): when management_cidrs is 0.0.0.0/0 this
+         renders as a /0 reply route via the hub PGW. That is REQUIRED for the
+         hub door to work: door PAT preserves the operator's public source IP,
+         so return traffic must leave via the hub PGW. Consequence: with open
+         management the kernel default route is pinned to HUB_PGW_ACTIVE and
+         FW-own egress rides the hub public IP. This is accepted while
+         management is temporarily open; once the whitelist is locked to
+         concrete CIDRs these per-CIDR reply routes narrow back to those
+         addresses and the EGRESS_PGW_ACTIVE system default takes over again. -->
+%{ for cidr in management_cidrs ~}
+    <route uuid="b2c3d4e5-0000-0000-0000-${format("%012d", index(management_cidrs, cidr) + 100)}">
+      <network>${cidr}</network>
+      <gateway>HUB_PGW_ACTIVE</gateway>
+      <descr>Management reply path via hub door (${cidr})</descr>
+      <disabled>0</disabled>
+    </route>
+%{ endfor ~}
+  </staticroutes>
+
+  <rrd>
+    <enable/>
+  </rrd>
+
+  <ntpd>
+    <prefer>0.opnsense.pool.ntp.org</prefer>
+    <interface>lan</interface>
+  </ntpd>
+
+  <revision>
+    <description>Hub &amp; Spoke Central Firewall — ${hostname}</description>
+    <time>0</time>
+  </revision>
+
+  <OPNsense>
+    <!-- Route-wash self-heal watchdog (OPNsense issue class #3414/#3128).
+         Root cause (proven on-box): the LAN DHCP classless-route renewal
+         (option 121) fires rc.newwanip -> system_routing_configure(), which
+         delete-then-re-adds static routes; inside the CARP INIT->BACKUP->MASTER
+         window the re-add is dropped on the master node (fw-active), and nothing
+         ever re-triggers it. Re-apply via the configd action 'routes.configure'
+         (registry actions_interface.conf -> /usr/local/etc/rc.routing_configure)
+         is proven on-box: it reinstalls the mgmt reply routes AND the
+         EGRESS_GROUP policy route that carries FW-own egress (a plain
+         static-route reload does not restore the latter).
+         This job reruns that action every 2 minutes on BOTH nodes (idempotent
+         on the backup), entering through the proper config-apply path
+         (OPNsense.cron -> service cron -> system_cron_configure -> template
+         reload OPNsense/Cron -> /var/cron/tabs/nobody) — the same path a
+         hand-edited crontab/config cannot trigger.
+         NOTE (26.1, verified on-box): configd accepts 'routes.configure'
+         fine; earlier notes claiming it is rejected are stale. -->
+    <cron>
+      <jobs>
+        <job>
+          <origin>stage3</origin>
+          <enabled>1</enabled>
+          <minutes>*/2</minutes>
+          <hours>*</hours>
+          <days>*</days>
+          <months>*</months>
+          <weekdays>*</weekdays>
+          <who>root</who>
+          <command>routes.configure</command>
+          <parameters></parameters>
+          <description>Re-apply routing + static routes (route-wash self-heal)</description>
+        </job>
+      </jobs>
+    </cron>
+    <!-- Internal networks excluded from Internet egress. -->
+    <Firewall>
+      <Alias version="1.0.1">
+        <geoip>
+          <url/>
+        </geoip>
+        <aliases>
+          <alias uuid="a11a5000-0000-0000-0000-000000000002">
+            <enabled>1</enabled>
+            <name>MGMT_SOURCES</name>
+            <type>network</type>
+            <proto/>
+            <interface/>
+            <counters>0</counters>
+            <updatefreq/>
+            <content>${join("\n", management_cidrs)}</content>
+            <description>Approved management CIDRs for SSH and WebUI</description>
+          </alias>
+          <alias uuid="a11a5000-0000-0000-0000-000000000003">
+            <enabled>1</enabled>
+            <name>FW_BACKUP_SOURCES</name>
+            <type>network</type>
+            <proto/>
+            <interface/>
+            <counters>0</counters>
+            <updatefreq/>
+            <content>${hub_cidr}</content>
+            <description>Hub LAN net - source of the serverless firewall backup exporter</description>
+          </alias>
+          <alias uuid="a11a5000-0000-0000-0000-000000000001">
+            <enabled>1</enabled>
+            <name>internal_nets</name>
+            <type>network</type>
+            <proto/>
+            <interface/>
+            <counters>0</counters>
+            <updatefreq/>
+            <content>10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16</content>
+            <description>RFC1918 internes (spokes/egress/sync, hub, on-prem) — egress carve-out</description>
+          </alias>
+        </aliases>
+      </Alias>
+    </Firewall>
+    <wireguard>
+      <general version="0.0.1">
+        <enabled>0</enabled>
+      </general>
+    </wireguard>
+  </OPNsense>
+
+</opnsense>
