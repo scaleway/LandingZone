@@ -184,9 +184,15 @@ resource "scaleway_instance_server" "fw_passive" {
   # OPNsense (CARP) config is injected through the native
   # user_data "opnsense_config" key (base64 XML); the appliance imports it
   # on first boot (same mechanism as the blueprint firewall-ha).
-  user_data = {
-    opnsense_config = base64encode(local.fw_passive_xml)
-  }
+  # var.extra_user_data_passive merges in additional keys (cloud-init etc.)
+  # without touching the XML - a clean channel for per-node tweaks that must
+  # not re-render/re-import (and reboot) the HA pair.
+  user_data = merge(
+    {
+      opnsense_config = base64encode(local.fw_passive_xml)
+    },
+    var.extra_user_data_passive,
+  )
 
   root_volume {
     boot                  = true
@@ -239,9 +245,14 @@ resource "scaleway_instance_server" "fw_active" {
   # public IP; OPNsense WAN = vtnet0 DHCP.
   ip_ids = var.fw_active_ip_id != null ? [var.fw_active_ip_id] : []
 
-  user_data = {
-    opnsense_config = base64encode(local.fw_active_xml)
-  }
+  # Same as fw_passive: XML via opnsense_config, plus per-node extra
+  # user-data keys (cloud-init etc.) merged in - no XML re-render/reboot.
+  user_data = merge(
+    {
+      opnsense_config = base64encode(local.fw_active_xml)
+    },
+    var.extra_user_data_active,
+  )
 
   root_volume {
     boot                  = true

@@ -26,7 +26,12 @@ Full stage-3 topology (hub door, HA pair, egress plane, sync plane, all IPs) liv
   dies.
 - **Egress (spokes + FW-own).** Dual egress PGWs on the egress PN (active
   `10.4.0.2`, public `51.159.145.9`, fr-par-2 + passive `10.4.0.3`, fr-par-1).
-  The hub VPC routes `0.0.0.0/0 -> FW CARP LAN VIP`; the FW policy-routes
+  SMTP (port 25) is blocked on the PGWs unless `enable_smtp.egress: true` is
+  set in the stage-3 YAML (Scaleway blocks SMTP by default to prevent abuse).
+  The `hub` role stays `false` by design: it is the inbound management door
+  (PAT/SSH/WEBUI) and never an SMTP egress path.
+  The hub VPC routes `0.0.0.0/0 -> FW CARP LAN VIP`; the FW
+  policy-routes
   spoke traffic (`route-to EGRESS_GROUP`, a failover gateway group over
   [active, passive]) with hybrid SNAT to the egress VIP `10.4.0.10`, and the
   active gateway masquerades everything to its public IP. FW **own** traffic
@@ -150,7 +155,12 @@ serial console `scw instance server console <fw-uuid> zone=<zone>`.
 
 - **Design data** (committed): `envs/<env>/data/security-appliances-<env>.yaml`
   (zones, IP plan, `management_cidrs`, `firewall_provider`, image settings,
-  test instances).
+  test instances). **Every boolean switch lives here** - feature flags
+  (`enable_smtp`, `create_test_instances`, ...) and the architecture section
+  (`vpcs`, `enable_vips`, `pgws`, `firewall_module_test_instances`). Nothing
+  is hardcoded as true/false in `main.tf`; the only exceptions are the
+  remote-state `skip_*` validations, exposed as the `state_skip_validation`
+  tfvars variable.
 - **Secrets, keys, wiring** (gitignored):
   `envs/<env>/3-security-appliances-<env>.tfvars` (OPNsense/CARP passwords,
   SSH keys, S3 upload credentials, remote state access).

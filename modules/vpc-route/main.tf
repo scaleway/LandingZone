@@ -27,6 +27,7 @@ resource "scaleway_vpc_route" "this" {
   for_each = var.routes
 
   vpc_id      = var.vpc_id
+  description = lookup(each.value, "description", null)
   destination = each.value.destination
   tags        = lookup(each.value, "tags", [])
   region      = var.region
