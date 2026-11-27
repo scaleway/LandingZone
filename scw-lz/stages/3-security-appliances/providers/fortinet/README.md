@@ -3,7 +3,7 @@
 Status: PLANNED. FortiGate VM on KVM/QEMU shape with **FGCP HA**
 (active/passive or active-active), dual-WAN capable. `modules/firewall` already
 has vendor scaffolding for FortiGate (dual-WAN NICs, cloud-init config drop,
-and an **IPAM failover function** in `failover.tf`).
+plus a planned **IPAM failover function**).
 
 ## Hard parts (why it is not a copy of OPNsense)
 
