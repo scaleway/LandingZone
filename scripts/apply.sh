@@ -5,6 +5,7 @@
 #
 # Usage:
 #   ./scripts/apply.sh [ENVIRONMENT] [--skip-bootstrap] [--plan] [--stage <stage>]
+#                      [--replace <resource-addr>]...
 #
 # ENVIRONMENT defaults to $ENV, then "dev". Reads the bootstrap-generated
 # per-env config files from scw-lz/envs/<ENV>/ (backend/providers/remote_state).
@@ -12,6 +13,12 @@
 #   --plan            dry-run only: terraform plan, change nothing.
 #   --stage <stage>   run only ONE stage (key "3-security-appliances", number
 #                     "3", or alias "stage-3"; also "bootstrap").
+#   --replace <addr>  force terraform to replace this resource (repeatable;
+#                     e.g. module.firewall_ha.scaleway_instance_server.fw_active).
+#                     For MANUAL forced reinstalls only. Golden-image rotations
+#                     do NOT need it: changing source_url/object_key in the
+#                     demo YAML already makes a plain apply rebuild the nodes
+#                     through the image-identity guard (replace_triggered_by).
 #
 # Stage metadata + the terraform driver are shared with destroy.sh via
 # scripts/lib/stages.sh.

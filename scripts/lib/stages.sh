@@ -240,8 +240,15 @@ load_env_creds() {
 #                      always an explicit, deliberate choice.
 #   --stage <key>      run only one stage (alias/number/key, resolved + validated)
 #   --plan             apply-only: dry-run instead of apply
+#   --replace <addr>   apply/plan-only (repeatable): force Terraform to replace
+#                      the given resource address (passes -replace=<addr>), e.g.
+#                      "module.firewall_ha.scaleway_instance_server.fw_active".
+#                      For MANUAL forced reinstalls of one node. Image rotations
+#                      do not need it: a new source_url/object_key already makes
+#                      a plain apply rebuild the nodes via the image-identity
+#                      guard (terraform_data + replace_triggered_by).
 # Sets globals: ENV_NAME, SKIP_BOOTSTRAP, INCLUDE_FOUNDATION, ACTION,
-#               STAGE_ONLY (canonical key or "").
+#               STAGE_ONLY (canonical key or ""), REPLACE_TARGETS (array).
 parse_cli() {
   local base="$1"; shift
   local _stage_input=""
@@ -251,6 +258,7 @@ parse_cli() {
   INCLUDE_FOUNDATION=false
   ACTION="${base}"
   STAGE_ONLY=""
+  REPLACE_TARGETS=()
 
   for ((i = 0; i < ${#_args[@]}; i++)); do
     arg="${_args[$i]}"
@@ -273,6 +281,16 @@ parse_cli() {
           err "--stage requires a value."
         fi
         STAGE_ONLY="${_args[$((i + 1))]}"
+        i=$((i + 1))
+        ;;
+      --replace)
+        if [[ "${base}" != "apply" ]]; then
+          err "--replace is only valid with apply (use ./scripts/apply.sh --replace <addr>)"
+        fi
+        if [[ $((i + 1)) -ge ${#_args[@]} ]]; then
+          err "--replace requires a resource address value."
+        fi
+        REPLACE_TARGETS+=("${_args[$((i + 1))]}")
         i=$((i + 1))
         ;;
       --*) err "unknown argument: ${arg}" ;;
@@ -317,6 +335,18 @@ run_stage() {
     destroy) tf=(terraform destroy -auto-approve -input=false) ;;
     *)       err "unknown action: ${action} (want apply|plan|destroy)" ;;
   esac
+
+  # Forward forced-replacement targets (--replace, apply/plan only): each
+  # address becomes -replace=<addr>. This is a MANUAL lever for reinstalling
+  # one node; image rotations do not need it (the image-identity guard in
+  # modules/firewall already rebuilds the nodes on a plain apply).
+  if (( ${#REPLACE_TARGETS[@]} > 0 )); then
+    local _rt
+    for _rt in "${REPLACE_TARGETS[@]}"; do
+      tf+=("-replace=${_rt}")
+      echo "  replace : ${_rt}"
+    done
+  fi
 
   echo ""
   case "${action}" in
