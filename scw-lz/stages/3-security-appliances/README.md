@@ -131,7 +131,44 @@ snapshots per zone, derives volumes, and boots the firewall instances:
 Editable source: [`docs/fw-mecanism.drawio.xml`](../../../docs/fw-mecanism.drawio.xml) (also available as annex in [`docs/Scaleway-Toolkit.drawio.xml`](../../../docs/Scaleway-Toolkit.drawio.xml)).
 
 - **Config injection**: per-node XML => `user_data["opnsense_config"]`
-  (OPNsense native import) + reboot.
+  (OPNsense native import) + reboot. An optional `cloud-init` user-data key
+  is merged beside it and delivered through **two channels** (hot apply +
+  boot consumption) without ever rebuilding/rebooting the pair. See *Node
+  user-data: dual-channel cloud-init* below.
+
+### Node user-data: dual-channel cloud-init
+
+Each firewall instance carries two user_data keys, merged without
+re-rendering the XML in `modules/firewall/main.tf`:
+
+- `opnsense_config`: the CARP XML, imported once on first boot.
+- `cloud-init`: an optional `#cloud-config` fragment for per-node tweaks.
+  Set it through `extra_user_data_active` / `extra_user_data_passive` in the
+  env tfvars (`3-security-appliances-<env>.tfvars`, gitignored). Only
+  `write_files` and `runcmd` are supported, and the content runs only when
+  it changes. Leave the variable empty for none.
+
+The fragment reaches the node through two independent channels. Both are
+idempotent on a content hash:
+
+| Channel | When | How |
+|---|---|---|
+| Path A, hot apply | every `apply` whose fragment changed | `null_resource.fw_extra_apply_active/passive` push it through the door with `../../../scripts/fw-extra-apply.sh` (SSH valid ports 8023/8022). The applied hash is stored in `/conf/.extra_uud_<node>.hash`. |
+| Path B, boot | every node boot | the baked `/usr/local/etc/rc.syshook.d/start/99-metadata` hook reads `user_data["cloud-init"]` and runs `write_files` and `runcmd` only when its hash differs from the marker. |
+
+When the marker already matches the desired hash, nothing runs and a second
+`apply` reports "0 changed". A boot after a content change re-applies it
+exactly once per node. Each run appends a timestamped line to
+`/var/log/uud_ran.log` with the real node hostname; the marker files live
+under `/conf/`.
+
+Changing or removing the `cloud-init` fragment only updates the instance
+user_data in place, so no FW rebuild, no reboot, no HA blip. Rebuilding the
+pair happens only on a golden-image rotation: changing the image URL or
+`object_key` rebuilds the snapshot and volume upstream, and the
+`terraform_data` image-identity guard in `modules/firewall` then forces the
+`instance_server` replacement. See *Boot image* above. All `true/false`
+switches live in the env YAML, never in `main.tf`.
 
 ## Access
 
