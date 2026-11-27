@@ -651,7 +651,7 @@ resource "scaleway_ipam_ip" "hub_pgw_passive" {
 locals {
   # One entry per gateway. active = var.zone; passive (alt_zone) only when a
   # passive LAN IP is provisioned. No default push anywhere: spoke egress is
-  # policy-routed (route-to EGRESS_GROUP) and hub steers 0.0.0.0/0 -> FW, so a
+  # policy-routed (route-to EGRESS_GROUP) and hub steers 0.0.0.0/0 => FW, so a
   # platform-pushed 0.0.0.0/0 would compete with both.
   pgws = merge(
     {
@@ -720,7 +720,7 @@ module "pgws" {
   }
 }
 
-# Resolved inbound PAT rule set for the hub doors: target -> private LAN IP
+# Resolved inbound PAT rule set for the hub doors: target => private LAN IP
 # (via door_target_ip). One full set per door gateway (active + passive),
 # created inside module.pgws["hub"] / module.pgws["hub_passive"] through their
 # pat_rules input - egress gateways carry none.

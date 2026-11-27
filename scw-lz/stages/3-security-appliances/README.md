@@ -30,7 +30,7 @@ Full stage-3 topology (hub door, HA pair, egress plane, sync plane, all IPs) liv
   set in the stage-3 YAML (Scaleway blocks SMTP by default to prevent abuse).
   The `hub` role stays `false` by design: it is the inbound management door
   (PAT/SSH/WEBUI) and never an SMTP egress path.
-  The hub VPC routes `0.0.0.0/0 -> FW CARP LAN VIP`; the FW
+  The hub VPC routes `0.0.0.0/0 => FW CARP LAN VIP`; the FW
   policy-routes
   spoke traffic (`route-to EGRESS_GROUP`, a failover gateway group over
   [active, passive]) with hybrid SNAT to the egress VIP `10.4.0.10`, and the

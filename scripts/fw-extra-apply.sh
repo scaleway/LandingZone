@@ -63,7 +63,7 @@ MARK_REMOTE="/conf/.extra_uud_${FW_NODE}.hash"
 SCRIPT_REMOTE="/tmp/fw-extra-${FW_NODE}.sh"
 
 # Remote login shell on OPNsense is csh, which rejects POSIX redirection
-# (`2>&1` / `2>/dev/null` -> "Ambiguous output redirect"). Every remote
+# (`2>&1` / `2>/dev/null` => "Ambiguous output redirect"). Every remote
 # command is therefore executed by /bin/sh. Careful quoting: ssh flattens its
 # argv into one string and the remote csh re-parses it, so the /bin/sh -c
 # argument is wrapped in LITERAL double quotes (they must survive both the
