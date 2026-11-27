@@ -170,6 +170,19 @@ pair happens only on a golden-image rotation: changing the image URL or
 `instance_server` replacement. See *Boot image* above. All `true/false`
 switches live in the env YAML, never in `main.tf`.
 
+### CARP boot demotion (issue #8)
+
+OPNsense 26.1 ships `net.inet.carp.senderr_demotion_factor="0"` in
+`/boot/loader.conf`, applied at every boot before CARP starts. The reported
+failure mode (first egress announcement send error => 240 demotion => node
+stuck in BACKUP) therefore cannot trigger on this stack; the fix proposed in
+issue #8 is already the base image default. Verify with
+`sysctl net.inet.carp.senderr_demotion_factor` (expected `0` on both nodes).
+Do not override it to a nonzero value through tunables: that would re-open
+the stuck-BACKUP path. `net.inet.carp.ifdown_demotion_factor` stays at the
+FreeBSD default 240 (interface-down events) and self-clears when the link
+returns; forced-failover recovery is exercised by the #16 drill.
+
 ## Access
 
 All management goes through the inbound door, restricted to
