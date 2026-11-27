@@ -14,6 +14,11 @@
 #   ENV=prod ./test-firewalls.sh --ensure   # (re)apply spoke public-IP reply routes
 #                                           # first, then run everything (recovers
 #                                           # blackholed public IPs without rebuild)
+#   ENV=prod ./test-firewalls.sh --failover-drill
+#                                           # after the full battery, force a CARP
+#                                           # failover (scw reboot of fw-active),
+#                                           # re-probe egress + east-west on the
+#                                           # new MASTER, then verify preempt-back
 #
 # The per-env test-firewalls.env is GENERATED from live state when missing
 # (and always re-generatable via `make fw-test-env`) - IPs/UUIDs/keys are not
@@ -110,6 +115,11 @@ SPOKE2_CMD="ssh ${SSHOPTS[*]} ubuntu@${SPOKE2_IP}"
 # (fw-active, door :8023) to its LAN private IP -- the standby (fw-passive)
 # cannot originate its own egress, so proxying via fw-passive times out.
 HUBTEST_CMD=(ssh "${SSHOPTS[@]}" -o ProxyCommand="ssh ${SSHOPTS[*]} -p 8023 -W %h:%p root@${DOOR}" "ubuntu@${HUBTEST_PRIV}")
+# Same hop via the standby door (:8022). Used by the section 11 failover drill
+# while fw-active is down: hub-test sits on the LAN behind the CARP VIP, so it
+# is reachable through whichever node is MASTER, and the standby door exposes
+# the same PAT set on the shared hub PGW.
+HUBTEST_PASSIVE_CMD=(ssh "${SSHOPTS[@]}" -o ProxyCommand="ssh ${SSHOPTS[*]} -p 8022 -W %h:%p root@${DOOR}" "ubuntu@${HUBTEST_PRIV}")
 
 # Test spokes have a public flexible IP AND a private NIC. The private-NIC DHCP
 # default (lower metric) shadows the public one, so reply traffic sourced from
@@ -125,6 +135,12 @@ SPOKE2_PROXY_CMD=(ssh "${SSHOPTS[@]}" -o ProxyCommand="ssh ${SSHOPTS[*]} -p 8023
 # without a rebuild).
 ENSURE=0
 for _a in "$@"; do [ "${_a}" = "--ensure" ] && ENSURE=1; done
+
+# --failover-drill: after the full battery, force a CARP failover (scw reboot
+# of fw-active), re-probe the spoke data plane on the new MASTER, then verify
+# the automatic preempt-back (advskew 0 wins). Opt-in: mutates live state.
+DRILL=0
+for _a in "$@"; do [ "${_a}" = "--failover-drill" ] && DRILL=1; done
 
 # -- Results --------------------------------------------------------------
 PASS=0; FAIL=0; SKIP=0
@@ -241,14 +257,23 @@ ensure_spoke_reply() { # ensure_spoke_reply <name> <proxy argv...>
 
 # Optional SCW creds (never printed) -- for the platform checks.
 # Prefer already-exported SCW creds; otherwise fall back to the gitignored
-# per-env service-account file (.creds/<env>-sa.env). No shell-history scraping.
+# per-env deploy key .creds/lz-<env>.env (repo convention), then legacy
+# single-file names. No shell-history scraping.
 HAS_SCW_CREDS=0
 if [ "${SKIP_SCW}" != "1" ] && command -v scw >/dev/null 2>&1; then
-  if [ -z "${SCW_ACCESS_KEY:-}" ] && [ -f "${REPO_ROOT}/.creds/${ENV}-sa.env" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "${REPO_ROOT}/.creds/${ENV}-sa.env"
-    set +a
+  if [ -z "${SCW_ACCESS_KEY:-}" ]; then
+    # Repo convention (scripts/lib/stages.sh): .creds/lz-<env>.env is the lz
+    # deploy key; legacy single-file names still work as fallbacks.
+    for _cf in "${REPO_ROOT}/.creds/lz-${ENV}.env" \
+               "${REPO_ROOT}/.creds/${ENV}-sa.env" \
+               "${REPO_ROOT}/.creds/${ENV}.env"; do
+      [ -f "${_cf}" ] || continue
+      set -a
+      # shellcheck disable=SC1090
+      . "${_cf}"
+      set +a
+      [ -n "${SCW_ACCESS_KEY:-}" ] && break
+    done
   fi
   [ -n "${SCW_ACCESS_KEY:-}" ] && HAS_SCW_CREDS=1
 fi
@@ -462,6 +487,151 @@ if [ "${RUN_TF}" = "1" ]; then
   fi
 else
   skip "terraform drift (enable with RUN_TF=1)"
+fi
+
+# ======================================================================
+hdr "11. Forced CARP failover drill (--failover-drill)"
+# ======================================================================
+# Opt-in: scw-reboot fw-active, watch the standby take MASTER, re-probe the
+# spoke data plane (egress + east-west) on the new MASTER, then watch the
+# automatic preempt-back (advskew 0 < 100). Also the live evidence for issue
+# #7: the deployed filter set has no stateless CARP pass rule, so a clean cut
+# without a double MASTER means no split-brain on this stack.
+if [ "${DRILL}" != "1" ]; then
+  skip "forced failover drill (enable with --failover-drill; mutates live state)"
+elif [ "${HAS_SCW_CREDS}" != "1" ]; then
+  skip "forced failover drill (needs scw creds for the instance reboot)"
+else
+  [ "${FAIL}" = "0" ] \
+    || { echo "Drill aborted: ${FAIL} failure(s) before section 11." >&2; exit 2; }
+  drill_tmp="$(mktemp -d)" || exit 2
+
+  # Convergence-aware egress probe for the drill: a fresh MASTER takes a few
+  # seconds to settle NAT + the route-to gateway group after CARP takeover, so
+  # retry before calling a miss (max ~5 tries, ~30 s). Fails only if the
+  # answer never converges, i.e. a real data-plane break.
+  drill_egress() { # drill_egress <label> <want1> <want2> <cmd...>
+    local lbl="$1" w1="$2" w2="$3"; shift 3
+    local try=0 out=""
+    for try in 1 2 3 4 5; do
+      out=$("$@" 'curl -4 -s --fail --max-time 10 https://myip.wtf/text' 2>/dev/null | tr -d '\r')
+      case "${out}" in
+        "${w1}"|"${w2}") ok "${lbl} -> ${out}"; return 0;;
+      esac
+      [ "${try}" -lt 5 ] && sleep 6
+    done
+    bad "${lbl} -> '${out}' (no convergence after 5 tries)"
+  }
+
+  # Baseline roles: active MASTER / passive BACKUP on both vhids (10, 11).
+  na=0; np=0
+  for v in 10 11; do
+    run_fw_grep active "ifconfig | grep -q 'carp: MASTER vhid ${v}'" && na=$((na+1))
+    run_fw_grep passive "ifconfig | grep -q 'carp: BACKUP vhid ${v}'" && np=$((np+1))
+  done
+  if [ "${na}" = "2" ] && [ "${np}" = "2" ]; then
+    ok "baseline roles: active MASTER / passive BACKUP (vhid 10+11)"
+  else
+    bad "baseline roles: active ${na}/2 MASTER, passive ${np}/2 BACKUP"
+    echo "Drill aborted: pair not in the expected baseline state." >&2
+    rm -rf "${drill_tmp}"; exit 2
+  fi
+
+  # Background loss probe (spoke-1 -> 1.1.1.1) covers a 120 s window; it
+  # self-terminates, so the stats are complete when the report reads them.
+  $SPOKE1_CMD "ping -c 240 -i 0.5 1.1.1.1" >"${drill_tmp}/ping.log" 2>&1 &
+  ping_pid=$!
+
+  # Cut: reboot fw-active, then poll the standby for MASTER on both vhids.
+  t0=$(date +%s)
+  if scw instance server reboot "${FW_ACTIVE_UUID}" zone="${FW_ACTIVE_ZONE}" >/dev/null 2>&1; then
+    ok "fw-active reboot issued (cut T+0 s)"
+    s0=$(date +%s)
+    while [ $(( $(date +%s) - s0 )) -lt 120 ]; do
+      run_fw_grep passive "ifconfig | grep -q 'carp: MASTER vhid 10'" \
+        && run_fw_grep passive "ifconfig | grep -q 'carp: MASTER vhid 11'" && break
+      sleep 3
+    done
+    if run_fw_grep passive "ifconfig | grep -q 'carp: MASTER vhid 10'" \
+        && run_fw_grep passive "ifconfig | grep -q 'carp: MASTER vhid 11'"; then
+      t1=$(date +%s)
+      ok "failover: standby is MASTER (both vhids) after $((t1-t0)) s cut window"
+    else
+      t1=$(date +%s)
+      bad "failover: standby never reached MASTER within 120 s (split-brain candidate)"
+    fi
+  else
+    bad "fw-active reboot failed (scw)"
+    t1=$(date +%s)
+  fi
+
+  # Data plane through the new MASTER (old passive, door :8022). Egress checks
+  # use drill_egress for the convergence retry; east-west is hub-direct and
+  # settled immediately in practice.
+  if [ "${t1}" -gt "${t0}" ]; then
+    drill_egress "spoke-1 egress via new MASTER" "${EGRESS}" "${EGRESS_PASSIVE}" ${SPOKE1_CMD}
+    drill_egress "spoke-2 egress via new MASTER" "${EGRESS}" "${EGRESS_PASSIVE}" ${SPOKE2_CMD}
+    drill_egress "hub-test egress via new MASTER" "${EGRESS}" "${EGRESS_PASSIVE}" "${HUBTEST_PASSIVE_CMD[@]}"
+    l12=$($SPOKE1_CMD "ping -c3 -W2 -i0.3 ${SPOKE2_PRIV}" 2>/dev/null | grep -o '[0-9.]*% packet loss' | head -1)
+    [ "${l12}" = "0% packet loss" ] && ok "spoke-1 -> spoke-2 east-west ${l12}" || bad "spoke-1 -> spoke-2 '${l12}'"
+    l21=$($SPOKE2_CMD "ping -c3 -W2 -i0.3 ${SPOKE1_PRIV}" 2>/dev/null | grep -o '[0-9.]*% packet loss' | head -1)
+    [ "${l21}" = "0% packet loss" ] && ok "spoke-2 -> spoke-1 east-west ${l21}" || bad "spoke-2 -> spoke-1 '${l21}'"
+  fi
+
+  # Drill back: the rebooted fw-active comes up and preempts (advskew 0 < 100).
+  s0=$(date +%s)
+  while [ $(( $(date +%s) - s0 )) -lt 240 ]; do
+    run_fw_grep active "ifconfig | grep -q 'carp: MASTER vhid 10'" \
+      && run_fw_grep active "ifconfig | grep -q 'carp: MASTER vhid 11'" && break
+    sleep 5
+  done
+  if [ "${t1}" -gt "${t0}" ] && run_fw_grep active "ifconfig | grep -q 'carp: MASTER vhid 10'" \
+      && run_fw_grep active "ifconfig | grep -q 'carp: MASTER vhid 11'"; then
+    t2=$(date +%s)
+    ok "preempt-back: fw-active MASTER again after $((t2-t1)) s restore window"
+  else
+    t2=$(date +%s)
+    bad "preempt-back: fw-active not MASTER within 240 s"
+  fi
+
+  # Restored roles: right after preempt-back the pair can flap for a few
+  # seconds, so re-check up to ~30 s before declaring a split-brain.
+  np=0; na=0; rtry=0
+  while [ "${rtry}" -lt 6 ] && { [ "${np}" != "2" ] || [ "${na}" != "2" ]; }; do
+    rtry=$((rtry+1)); np=0; na=0
+    for v in 10 11; do
+      run_fw_grep passive "ifconfig | grep -q 'carp: BACKUP vhid ${v}'" && np=$((np+1))
+      run_fw_grep active "ifconfig | grep -q 'carp: MASTER vhid ${v}'" && na=$((na+1))
+    done
+    if [ "${np}" != "2" ] || [ "${na}" != "2" ]; then sleep 5; fi
+  done
+  [ "${np}" = "2" ] && ok "roles restored: passive BACKUP (both vhids)" || bad "passive not fully BACKUP (${np}/2)"
+  [ "${na}" = "2" ] && ok "roles restored: active MASTER (both vhids)" || bad "active not fully MASTER (${na}/2)"
+
+  # Restored-state egress + east-west (door :8023 again).
+  w=$($FW_ACTIVE_CMD 'curl -4 -s --max-time 10 https://myip.wtf/text' 2>/dev/null | tr -d '\r')
+  [ "${w}" = "${EGRESS}" ] && ok "FW-own egress restored -> ${w}" || bad "FW-own egress -> '${w}'"
+  for side in 1 2; do
+    if [ "${side}" = "1" ]; then cmd="${SPOKE1_CMD}"; lbl="spoke-1"; else cmd="${SPOKE2_CMD}"; lbl="spoke-2"; fi
+    out=$(${cmd} 'curl -4 -s --fail --max-time 10 https://myip.wtf/text' 2>/dev/null | tr -d '\r')
+    [ "${out}" = "${EGRESS}" ] && ok "${lbl} egress restored -> ${out}" || bad "${lbl} egress -> '${out}'"
+  done
+  l12=$($SPOKE1_CMD "ping -c3 -W2 -i0.3 ${SPOKE2_PRIV}" 2>/dev/null | grep -o '[0-9.]*% packet loss' | head -1)
+  [ "${l12}" = "0% packet loss" ] && ok "east-west restored spoke-1 -> spoke-2 ${l12}" || bad "east-west restored spoke-1 -> spoke-2 '${l12}'"
+  l21=$($SPOKE2_CMD "ping -c3 -W2 -i0.3 ${SPOKE1_PRIV}" 2>/dev/null | grep -o '[0-9.]*% packet loss' | head -1)
+  [ "${l21}" = "0% packet loss" ] && ok "east-west restored spoke-2 -> spoke-1 ${l21}" || bad "east-west restored spoke-2 -> spoke-1 '${l21}'"
+
+  # Drill report: windows + observed loss on the background probe (now done).
+  wait "${ping_pid}" 2>/dev/null
+  pstat=$(grep -o '[0-9.]*% packet loss' "${drill_tmp}/ping.log" | head -1)
+  prtt=$(grep -oE 'min/avg/max[^=]*= [0-9.]+/[0-9.]+/[0-9.]+' "${drill_tmp}/ping.log" | tail -1 | sed 's/.*= //')
+  if [ -n "${pstat}" ]; then
+    ok "drill loss probe (spoke-1 -> 1.1.1.1): ${pstat}${prtt:+ rtt ${prtt}}"
+  else
+    bad "drill loss probe: no ping stats in ${drill_tmp}/ping.log"
+  fi
+  echo "  drill report: cut $((t1-t0)) s | restore $((t2-t1)) s | probe ${pstat:-no stats}"
+  rm -rf "${drill_tmp}"
 fi
 
 # -- Summary ------------------------------------------------------------
