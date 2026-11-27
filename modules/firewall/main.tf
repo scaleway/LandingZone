@@ -164,6 +164,26 @@ resource "scaleway_ipam_ip" "vip_lan" {
 }
 
 # ---------------------------------------------------------------------------
+# Image-identity guards: the root volumes live in modules/firewall-image, so
+# this module cannot reference them directly (replace_triggered_by only
+# accepts resource references, not module variables). Each guard mirrors the
+# image-derived volume ID; when a golden image rotates it (snapshot -> volume
+# rebuild upstream), the guard is replaced and forces the instance to rebuild.
+# A config-only change (extra_user_data / XML) never touches these - no rebuild.
+# ---------------------------------------------------------------------------
+resource "terraform_data" "fw_passive_root_volume" {
+  triggers_replace = {
+    volume_id = var.snapshot_ids[local.zones.fw_passive].volume_id
+  }
+}
+
+resource "terraform_data" "fw_active_root_volume" {
+  triggers_replace = {
+    volume_id = var.snapshot_ids[local.zones.fw_active].volume_id
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Firewall instances
 # ---------------------------------------------------------------------------
 resource "scaleway_instance_server" "fw_passive" {
@@ -200,6 +220,18 @@ resource "scaleway_instance_server" "fw_passive" {
     size_in_gb            = var.snapshot_ids[local.zones.fw_passive].size_gb
     volume_id             = var.snapshot_ids[local.zones.fw_passive].volume_id
     volume_type           = "sbs_volume"
+  }
+
+  # A new golden image rotates the root volume ID (snapshot -> volume rebuild)
+  # upstream in modules/firewall-image. The provider would otherwise treat a
+  # root_volume volume_id swap as an in-place update - but the disk (and its
+  # boot image) actually changes, so force a full node replacement. terraform_data
+  # turns the (value-only) var into a replace_triggered_by-visible resource keyed
+  # on the image-derived volume ID.
+  lifecycle {
+    replace_triggered_by = [
+      terraform_data.fw_passive_root_volume,
+    ]
   }
 }
 
@@ -260,6 +292,18 @@ resource "scaleway_instance_server" "fw_active" {
     size_in_gb            = var.snapshot_ids[local.zones.fw_active].size_gb
     volume_id             = var.snapshot_ids[local.zones.fw_active].volume_id
     volume_type           = "sbs_volume"
+  }
+
+  # A new golden image rotates the root volume ID (snapshot -> volume rebuild)
+  # upstream in modules/firewall-image. The provider would otherwise treat a
+  # root_volume volume_id swap as an in-place update - but the disk (and its
+  # boot image) actually changes, so force a full node replacement. terraform_data
+  # turns the (value-only) var into a replace_triggered_by-visible resource keyed
+  # on the image-derived volume ID.
+  lifecycle {
+    replace_triggered_by = [
+      terraform_data.fw_active_root_volume,
+    ]
   }
 }
 
