@@ -26,7 +26,12 @@ Full stage-3 topology (hub door, HA pair, egress plane, sync plane, all IPs) liv
   dies.
 - **Egress (spokes + FW-own).** Dual egress PGWs on the egress PN (active
   `10.4.0.2`, public `51.159.145.9`, fr-par-2 + passive `10.4.0.3`, fr-par-1).
-  The hub VPC routes `0.0.0.0/0 -> FW CARP LAN VIP`; the FW policy-routes
+  SMTP (port 25) is blocked on the PGWs unless `enable_smtp.egress: true` is
+  set in the stage-3 YAML (Scaleway blocks SMTP by default to prevent abuse).
+  The `hub` role stays `false` by design: it is the inbound management door
+  (PAT/SSH/WEBUI) and never an SMTP egress path.
+  The hub VPC routes `0.0.0.0/0 => FW CARP LAN VIP`; the FW
+  policy-routes
   spoke traffic (`route-to EGRESS_GROUP`, a failover gateway group over
   [active, passive]) with hybrid SNAT to the egress VIP `10.4.0.10`, and the
   active gateway masquerades everything to its public IP. FW **own** traffic
@@ -126,7 +131,57 @@ snapshots per zone, derives volumes, and boots the firewall instances:
 Editable source: [`docs/fw-mecanism.drawio.xml`](../../../docs/fw-mecanism.drawio.xml) (also available as annex in [`docs/Scaleway-Toolkit.drawio.xml`](../../../docs/Scaleway-Toolkit.drawio.xml)).
 
 - **Config injection**: per-node XML => `user_data["opnsense_config"]`
-  (OPNsense native import) + reboot.
+  (OPNsense native import) + reboot. An optional `cloud-init` user-data key
+  is merged beside it and delivered through **two channels** (hot apply +
+  boot consumption) without ever rebuilding/rebooting the pair. See *Node
+  user-data: dual-channel cloud-init* below.
+
+### Node user-data: dual-channel cloud-init
+
+Each firewall instance carries two user_data keys, merged without
+re-rendering the XML in `modules/firewall/main.tf`:
+
+- `opnsense_config`: the CARP XML, imported once on first boot.
+- `cloud-init`: an optional `#cloud-config` fragment for per-node tweaks.
+  Set it through `extra_user_data_active` / `extra_user_data_passive` in the
+  env tfvars (`3-security-appliances-<env>.tfvars`, gitignored). Only
+  `write_files` and `runcmd` are supported, and the content runs only when
+  it changes. Leave the variable empty for none.
+
+The fragment reaches the node through two independent channels. Both are
+idempotent on a content hash:
+
+| Channel | When | How |
+|---|---|---|
+| Path A, hot apply | every `apply` whose fragment changed | `null_resource.fw_extra_apply_active/passive` push it through the door with `../../../scripts/fw-extra-apply.sh` (SSH valid ports 8023/8022). The applied hash is stored in `/conf/.extra_uud_<node>.hash`. |
+| Path B, boot | every node boot | the baked `/usr/local/etc/rc.syshook.d/start/99-metadata` hook reads `user_data["cloud-init"]` and runs `write_files` and `runcmd` only when its hash differs from the marker. |
+
+When the marker already matches the desired hash, nothing runs and a second
+`apply` reports "0 changed". A boot after a content change re-applies it
+exactly once per node. Each run appends a timestamped line to
+`/var/log/uud_ran.log` with the real node hostname; the marker files live
+under `/conf/`.
+
+Changing or removing the `cloud-init` fragment only updates the instance
+user_data in place, so no FW rebuild, no reboot, no HA blip. Rebuilding the
+pair happens only on a golden-image rotation: changing the image URL or
+`object_key` rebuilds the snapshot and volume upstream, and the
+`terraform_data` image-identity guard in `modules/firewall` then forces the
+`instance_server` replacement. See *Boot image* above. All `true/false`
+switches live in the env YAML, never in `main.tf`.
+
+### CARP boot demotion (issue #8)
+
+OPNsense 26.1 ships `net.inet.carp.senderr_demotion_factor="0"` in
+`/boot/loader.conf`, applied at every boot before CARP starts. The reported
+failure mode (first egress announcement send error => 240 demotion => node
+stuck in BACKUP) therefore cannot trigger on this stack; the fix proposed in
+issue #8 is already the base image default. Verify with
+`sysctl net.inet.carp.senderr_demotion_factor` (expected `0` on both nodes).
+Do not override it to a nonzero value through tunables: that would re-open
+the stuck-BACKUP path. `net.inet.carp.ifdown_demotion_factor` stays at the
+FreeBSD default 240 (interface-down events) and self-clears when the link
+returns; forced-failover recovery is exercised by the #16 drill.
 
 ## Access
 
@@ -150,7 +205,12 @@ serial console `scw instance server console <fw-uuid> zone=<zone>`.
 
 - **Design data** (committed): `envs/<env>/data/security-appliances-<env>.yaml`
   (zones, IP plan, `management_cidrs`, `firewall_provider`, image settings,
-  test instances).
+  test instances). **Every boolean switch lives here** - feature flags
+  (`enable_smtp`, `create_test_instances`, ...) and the architecture section
+  (`vpcs`, `enable_vips`, `pgws`, `firewall_module_test_instances`). Nothing
+  is hardcoded as true/false in `main.tf`; the only exceptions are the
+  remote-state `skip_*` validations, exposed as the `state_skip_validation`
+  tfvars variable.
 - **Secrets, keys, wiring** (gitignored):
   `envs/<env>/3-security-appliances-<env>.tfvars` (OPNsense/CARP passwords,
   SSH keys, S3 upload credentials, remote state access).

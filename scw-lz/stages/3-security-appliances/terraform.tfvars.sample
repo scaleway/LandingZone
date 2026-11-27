@@ -35,6 +35,27 @@ carp_password               = "CHANGE-ME-CARP-Secret!"
 #   opnsense_ssh_public_key        = "ssh-ed25519 AAAA... (optional override)"
 #   opnsense_backup_ssh_public_key = "ssh-ed25519 AAAA... (optional override)"
 
+# ---------------------------------------------------------------------------
+# Extra per-node user-data (optional, default {}). The "cloud-init" key is a
+# minimal #cloud-config (write_files + runcmd) delivered to the firewall
+# through two idempotent channels. It is hot-applied through the door on
+# apply (no rebuild/reboot) and consumed at boot by the baked 99-metadata
+# hook. Changing this never rebuilds the pair. See the stage-3 README,
+# "Node user-data: dual-channel cloud-init". Leave unset for none.
+# ---------------------------------------------------------------------------
+# extra_user_data_active = {
+#   "cloud-init" = <<-EOT
+# #cloud-config
+# write_files:
+#   - path: /conf/.my_node_tweak
+#     permissions: '0644'
+#     content: "hello"
+# runcmd:
+#   - sh -c 'echo "boot-consumed $(hostname)" >> /var/log/custom.log'
+# EOT
+# }
+# extra_user_data_passive = {}
+
 # S3 credentials that upload the firewall image object to the bucket
 # (enable_upload in the factory yaml). OPTIONAL - leave unset ("") when the
 # image is delivered via source_url or uploaded by the operator.

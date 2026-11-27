@@ -38,3 +38,30 @@ variable "force_destroy" {
   type        = bool
   default     = false
 }
+
+variable "provisioner" {
+  description = <<-EOF
+    Optional local-exec hook for lifecycle actions on the bucket. Leave null
+    (default) for no hooks.
+
+    - command: arbitrary bash script. On destroy it runs with BUCKET / REGION /
+      ENDPOINT (the bucket's S3 endpoint) exported, so it can empty the bucket
+      before deletion (terraform refuses to delete a non-empty bucket - 409),
+      or do anything else.
+    - on_create: also run at apply time (plain create-time provisioner).
+    - on_destroy: run before the bucket is destroyed. Terraform forbids
+      variable references inside destroy-time provisioners, so the module
+      materializes this hook on a companion terraform_data resource and feeds
+      the script through its self.input - fully generic, no size limits, no
+      state/tag encoding tricks.
+    - interpreter / environment: only used for the create-time run.
+  EOF
+  type = object({
+    command     = string
+    on_create   = optional(bool, false)
+    on_destroy  = optional(bool, false)
+    interpreter = optional(list(string), ["bash", "-c"])
+    environment = optional(map(string), {})
+  })
+  default = null
+}

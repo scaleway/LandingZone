@@ -21,6 +21,7 @@ Next hop fields (exactly one must be set):
 EOF
   type = map(object({
     destination                = string
+    description                = optional(string, null)
     nexthop_vpc_connector_id   = optional(string)
     nexthop_resource_id        = optional(string)
     nexthop_private_network_id = optional(string)

@@ -69,11 +69,23 @@ variable "enable_smtp" {
 }
 
 variable "gateway_networks" {
-  description = "Map of Private Network attachments (GatewayNetworks)."
+  description = "Map of Private Network attachments (GatewayNetworks). Optional `ipam_ip_id` pins a deterministic IPAM IP on the attachment (needed when firewall routes reference a fixed gateway address); omit to let the platform auto-assign."
   type = map(object({
     private_network_id = string
     enable_masquerade  = optional(bool, true)
     push_default_route = optional(bool, true)
+    ipam_ip_id         = optional(string, null)
+  }))
+  default = {}
+}
+
+variable "pat_rules" {
+  description = "Optional inbound PAT (DNAT) rules exposed on this gateway's public IP. Map key => rule; each rule is {private_ip, private_port, public_port, protocol}. Empty = no inbound PAT. Creating them here guarantees they land after the gateway and its attachment exist."
+  type = map(object({
+    private_ip   = string
+    private_port = number
+    public_port  = number
+    protocol     = optional(string, "tcp")
   }))
   default = {}
 }

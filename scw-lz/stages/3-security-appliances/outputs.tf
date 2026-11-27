@@ -36,8 +36,8 @@ locals {
   # both public IPs (see main.tf door_pat_rules). Active/passive: use door_ip
   # normally, switch to door_ip_passive if the active dies ("" when not
   # provisioned).
-  door_ip         = scaleway_vpc_public_gateway_ip.hub.address
-  door_ip_passive = length(scaleway_vpc_public_gateway_ip.hub_passive) > 0 ? scaleway_vpc_public_gateway_ip.hub_passive[0].address : ""
+  door_ip         = module.pgws["hub"].ip_address
+  door_ip_passive = try(module.pgws["hub_passive"].ip_address, "")
   fw_passive_ssh  = "ssh -i ${local.fw_ssh_key} root@${local.door_ip} -p 8022"
   fw_active_ssh   = "ssh -i ${local.fw_ssh_key} root@${local.door_ip} -p 8023"
 }
@@ -89,7 +89,7 @@ output "test_protocol" {
       direct = local.factory.create_test_instances ? "${local.spoke_b_ssh} 'ping -c3 ${local.spoke1_priv}'  # attendu: 0% loss (hub-direct)" : "n/a - create_test_instances=false"
     }
     egress = {
-      public_ip = local.factory.create_test_instances ? "${local.spoke_a_ssh} 'curl -4 --fail --max-time 10 https://myip.wtf/text'  # attendu: ${scaleway_vpc_public_gateway_ip.egress.address} (egress PGW)" : "n/a - create_test_instances=false"
+      public_ip = local.factory.create_test_instances ? "${local.spoke_a_ssh} 'curl -4 --fail --max-time 10 https://myip.wtf/text'  # attendu: ${module.pgws["egress"].ip_address} (egress PGW)" : "n/a - create_test_instances=false"
       trace     = local.factory.create_test_instances ? "${local.spoke_a_ssh} 'traceroute 1.1.1.1'" : "n/a - create_test_instances=false"
     }
     firewall = {
@@ -102,7 +102,7 @@ output "test_protocol" {
       # Verify on the MASTER (fw-active): a CARP standby cannot originate
       # VIP-sourced own traffic (OPNsense HA limitation - it is sent to the
       # master and dropped).
-      fw_own_egress = "${local.fw_active_ssh} 'curl -4 --max-time 10 https://myip.wtf/text; netstat -rn | grep default'  # attendu: ${scaleway_vpc_public_gateway_ip.egress.address} (egress PGW masquerade)"
+      fw_own_egress = "${local.fw_active_ssh} 'curl -4 --max-time 10 https://myip.wtf/text; netstat -rn | grep default'  # attendu: ${module.pgws["egress"].ip_address} (egress PGW masquerade)"
     }
     ha = {
       stop_fw_passive  = "scw instance server stop ${local.fw_passive_uuid} zone=${local.factory.zones["fw-passive"]} --wait"
@@ -123,8 +123,8 @@ output "resource_ids" {
     fw_active_zone       = local.factory.zones["fw-active"]
     hub_door_ip          = local.door_ip
     hub_door_ip_passive  = local.door_ip_passive
-    egress_gw_ip         = scaleway_vpc_public_gateway_ip.egress.address
-    egress_gw_ip_passive = length(scaleway_vpc_public_gateway_ip.egress_passive) > 0 ? scaleway_vpc_public_gateway_ip.egress_passive[0].address : null
+    egress_gw_ip         = module.pgws["egress"].ip_address
+    egress_gw_ip_passive = try(module.pgws["egress_passive"].ip_address, null)
     test_instances       = local.factory.create_test_instances ? { for k, v in module.test_instances : k => v.id } : {}
   }
 }
@@ -142,8 +142,8 @@ output "firewall_test_config" {
   value = {
     DOOR               = local.door_ip
     DOOR_PASSIVE       = local.door_ip_passive
-    EGRESS             = scaleway_vpc_public_gateway_ip.egress.address
-    EGRESS_PASSIVE     = length(scaleway_vpc_public_gateway_ip.egress_passive) > 0 ? scaleway_vpc_public_gateway_ip.egress_passive[0].address : ""
+    EGRESS             = module.pgws["egress"].ip_address
+    EGRESS_PASSIVE     = try(module.pgws["egress_passive"].ip_address, "")
     SPOKE1_IP          = local.spoke1_ip
     SPOKE2_IP          = local.spoke2_ip
     SPOKE1_PRIV        = local.spoke1_priv
@@ -166,7 +166,7 @@ output "firewall_test_config" {
 output "ingress_rules" {
   description = "Hub steering into the FW (hub 0.0.0.0/0 -> FW CARP LAN VIP route - the ingress-rule redirect proved lossy 33-90% and was replaced)."
   value = {
-    route_id                = scaleway_vpc_route.hub_default_to_fw.id
+    route_id                = module.hub_default_to_fw.ids["hub_default_to_fw"]
     nexthop_private_network = local.hub_private_network_ids[local.factory.hub_lan_pn_key]
     nexthop_resource_ip     = module.firewall_ha.vip_lan_ip
   }
@@ -190,7 +190,7 @@ output "fw_volume_map" {
 
 output "firewall_mgmt_sg_id" {
   description = "ID of the firewall-management security group (null if not created)."
-  value       = length(scaleway_instance_security_group.firewall_mgmt) > 0 ? scaleway_instance_security_group.firewall_mgmt[0].id : null
+  value       = length(module.firewall_mgmt_sg) > 0 ? module.firewall_mgmt_sg[0].id : null
 }
 
 output "fw_passive_lan_ip" {

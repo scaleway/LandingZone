@@ -253,10 +253,10 @@ data "terraform_remote_state" "stage1" {
     }
     access_key                  = var.state_access_key
     secret_key                  = var.state_secret_key
-    skip_region_validation      = true
-    skip_credentials_validation = true
-    skip_requesting_account_id  = true
-    skip_metadata_api_check     = true
+    skip_region_validation      = var.state_skip_validation
+    skip_credentials_validation = var.state_skip_validation
+    skip_requesting_account_id  = var.state_skip_validation
+    skip_metadata_api_check     = var.state_skip_validation
   }
 }
 
@@ -271,10 +271,10 @@ data "terraform_remote_state" "stage2" {
     }
     access_key                  = var.state_access_key
     secret_key                  = var.state_secret_key
-    skip_region_validation      = true
-    skip_credentials_validation = true
-    skip_requesting_account_id  = true
-    skip_metadata_api_check     = true
+    skip_region_validation      = var.state_skip_validation
+    skip_credentials_validation = var.state_skip_validation
+    skip_requesting_account_id  = var.state_skip_validation
+    skip_metadata_api_check     = var.state_skip_validation
   }
 }
 
@@ -381,9 +381,9 @@ module "vpc_sync" {
   region     = var.region
   tags       = concat(local.common_tags, ["ha", "sync"])
 
-  enable_routing                   = true
-  enable_custom_routes_propagation = true
-  enable_transitivity              = false
+  enable_routing                   = local.factory.vpcs.sync.enable_routing
+  enable_custom_routes_propagation = local.factory.vpcs.sync.enable_custom_routes_propagation
+  enable_transitivity              = local.factory.vpcs.sync.enable_transitivity
 
   private_networks = {
     sync = {
@@ -446,8 +446,8 @@ module "firewall_ha" {
   # fw_active @ fr-par-2). The module falls back to "firewall_mgmt" if a node
   # key is absent.
   security_group_ids = {
-    fw_passive = local.factory.create_firewall_mgmt_sg ? scaleway_instance_security_group.firewall_mgmt_az1[0].id : null
-    fw_active  = local.factory.create_firewall_mgmt_sg ? scaleway_instance_security_group.firewall_mgmt[0].id : null
+    fw_passive = local.factory.create_firewall_mgmt_sg ? module.firewall_mgmt_sg_az1[0].id : null
+    fw_active  = local.factory.create_firewall_mgmt_sg ? module.firewall_mgmt_sg[0].id : null
   }
 
   # Private-only: no fw_passive_ip_id / fw_active_ip_id (module default null);
@@ -471,13 +471,22 @@ module "firewall_ha" {
   vip_lan_mac = local.carp_vmac
   vip_wan_mac = local.carp_vmac_egress
 
-  enable_vips           = true
+  enable_vips           = local.factory.enable_vips
   create_default_routes = local.factory.create_default_routes
-  create_test_instances = false
+  # Module-internal LAN/WAN ping testers come from the factory
+  # firewall_module_test_instances flag (YAML) - keep false: stage 3
+  # provisions its own test instances below (module.test_instances) and a
+  # second set would double-create.
+  create_test_instances = local.factory.firewall_module_test_instances
 
   # Rendered per-node XML (locals above), injected via user_data["opnsense_config"].
   fw_passive_config_xml = local.fw_passive_config_xml
   fw_active_config_xml  = local.fw_active_config_xml
+
+  # Per-node extra user-data (cloud-init etc.), merged beside the XML without
+  # re-rendering it - changing these never reboots the HA pair.
+  extra_user_data_passive = var.extra_user_data_passive
+  extra_user_data_active  = var.extra_user_data_active
 
   admin_pubkey = local.fw_admin_ssh_key
 
@@ -485,8 +494,78 @@ module "firewall_ha" {
   ha_cidr = local.sync_cidr
 }
 
-# NOTE: the inline egress plane below replaces the blueprint's modules/egress
-# (kept commented as a reference).
+# ---------------------------------------------------------------------------
+# Extra user-data hot-apply: per-node "cloud-init" key is NOT consumed by the
+# appliance at boot (the 99-metadata hook only reads opnsense_config). These
+# null_resources deliver the payload through the hub door PAT (8022/8023) with
+# hash idempotency - the rendered script records sha256(content) as the node
+# marker (/conf/.extra_uud_<node>.hash) and skips when it already matches.
+# Changing extra_user_data re-runs the apply in place: no FW rebuild, no
+# reboot (the user_data merge itself never re-renders the XML).
+# ---------------------------------------------------------------------------
+locals {
+  extra_ci_passive = try(var.extra_user_data_passive["cloud-init"], "")
+  extra_ci_active  = try(var.extra_user_data_active["cloud-init"], "")
+}
+
+resource "null_resource" "fw_extra_apply_passive" {
+  count = local.extra_ci_passive != "" ? 1 : 0
+
+  # The door/FW pair must exist before we can push through it; nothing else
+  # at this stage gates on the firewall instances themselves.
+  depends_on = [module.firewall_ha]
+
+  triggers = {
+    ci_hash = sha256(local.extra_ci_passive)
+    door    = local.door_ip
+    node    = "passive"
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      CI_B64='${base64encode(local.extra_ci_passive)}'
+      CI_FILE="$(mktemp /tmp/fw-extra-passive.XXXXXX)"
+      trap 'rm -f "$${CI_FILE}"' EXIT
+      python3 -c "import base64,sys; sys.stdout.write(base64.b64decode(sys.argv[1]).decode())" "$${CI_B64}" > "$${CI_FILE}"
+      FW_CI_FILE="$${CI_FILE}" \
+      FW_CI_HASH='${sha256(local.extra_ci_passive)}' \
+      FW_NODE=passive \
+      DOOR='${local.door_ip}' \
+      "${path.module}/../../../scripts/fw-extra-apply.sh"
+    EOT
+  }
+}
+
+resource "null_resource" "fw_extra_apply_active" {
+  count = local.extra_ci_active != "" ? 1 : 0
+
+  depends_on = [module.firewall_ha]
+
+  triggers = {
+    ci_hash = sha256(local.extra_ci_active)
+    door    = local.door_ip
+    node    = "active"
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      CI_B64='${base64encode(local.extra_ci_active)}'
+      CI_FILE="$(mktemp /tmp/fw-extra-active.XXXXXX)"
+      trap 'rm -f "$${CI_FILE}"' EXIT
+      python3 -c "import base64,sys; sys.stdout.write(base64.b64decode(sys.argv[1]).decode())" "$${CI_B64}" > "$${CI_FILE}"
+      FW_CI_FILE="$${CI_FILE}" \
+      FW_CI_HASH='${sha256(local.extra_ci_active)}' \
+      FW_NODE=active \
+      DOOR='${local.door_ip}' \
+      "${path.module}/../../../scripts/fw-extra-apply.sh"
+    EOT
+  }
+}
+
 
 # ---------------------------------------------------------------------------
 # Egress VPC (WAN side), the firewalls' opt2 NIC lives here; the egress PGW
@@ -501,9 +580,9 @@ module "vpc_egress" {
   region     = var.region
   tags       = concat(local.common_tags, ["egress"])
 
-  enable_routing                   = true
-  enable_custom_routes_propagation = true
-  enable_transitivity              = false
+  enable_routing                   = local.factory.vpcs.egress.enable_routing
+  enable_custom_routes_propagation = local.factory.vpcs.egress.enable_custom_routes_propagation
+  enable_transitivity              = local.factory.vpcs.egress.enable_transitivity
 
   private_networks = {
     egress = {
@@ -513,12 +592,19 @@ module "vpc_egress" {
   }
 }
 
-# --- Active egress Public Gateway (var.zone) ---------------------------------
-# Dual egress: active here + passive below (alt zone); both masquerade the
-# egress PN independently, OPNsense EGRESS_GROUP drives default + route-to.
+# --- Public Gateways --------------------------------------------------------
+# All four gateways (egress + hub, each active + passive) go through the
+# modules/public-gateway module. The module pins deterministic IPAM IPs on the
+# GatewayNetwork attachments -- the firewall config template references these
+# fixed addresses (EGRESS_PGW / HUB_PGW as next-hops + dpinger targets), so
+# they cannot be platform-assigned at random.
+#
+# The fixed LAN IPs themselves (scaleway_ipam_ip.*) stay HERE in stage 3: they
+# are part of the per-env IP design plan (factory YAML), not the module's.
+# The module only creates the public IP, the gateway, and the attachment.
 resource "scaleway_ipam_ip" "egress_pgw" {
   address    = local.egress_pgw_active_lan_ip
-  is_ipv6    = false
+  is_ipv6    = local.factory.ipam.ipv6
   project_id = local.project_id
   tags       = concat(local.common_tags, ["firewall", "pgw-egress"])
 
@@ -527,40 +613,10 @@ resource "scaleway_ipam_ip" "egress_pgw" {
   }
 }
 
-resource "scaleway_vpc_public_gateway_ip" "egress" {
-  zone = var.zone
-}
-
-resource "scaleway_vpc_public_gateway" "egress" {
-  name       = "${local.name_prefix}-pgw-egress"
-  type       = "VPC-GW-S"
-  ip_id      = scaleway_vpc_public_gateway_ip.egress.id
-  project_id = local.project_id
-  zone       = var.zone
-  tags       = concat(local.common_tags, ["firewall", "pgw-egress"])
-}
-
-resource "scaleway_vpc_gateway_network" "egress" {
-  gateway_id         = scaleway_vpc_public_gateway.egress.id
-  private_network_id = module.vpc_egress.private_network_ids["egress"]
-  enable_masquerade  = true
-  # No default push: spoke egress is policy-routed (route-to EGRESS_PGW) and
-  # FW default is HUB_PGW, a pushed 0.0.0.0/0 would compete with both.
-  zone = var.zone
-
-  ipam_config {
-    push_default_route = false
-    ipam_ip_id         = scaleway_ipam_ip.egress_pgw.id
-  }
-}
-
-# --- Passive Egress Public Gateway (alt zone, cross-AZ) ----------------------
-# Same egress PN; removes the single-AZ dependency (EGRESS group falls over
-# here on AZ loss). Public egress IP changes on failover.
 resource "scaleway_ipam_ip" "egress_pgw_passive" {
   count      = length(local.egress_gateways) > 1 ? 1 : 0
   address    = local.egress_gateways[1]
-  is_ipv6    = false
+  is_ipv6    = local.factory.ipam.ipv6
   project_id = local.project_id
   tags       = concat(local.common_tags, ["firewall", "pgw-egress", "passive"])
 
@@ -569,44 +625,9 @@ resource "scaleway_ipam_ip" "egress_pgw_passive" {
   }
 }
 
-resource "scaleway_vpc_public_gateway_ip" "egress_passive" {
-  count = length(local.egress_gateways) > 1 ? 1 : 0
-  zone  = local.alt_zone
-}
-
-resource "scaleway_vpc_public_gateway" "egress_passive" {
-  count      = length(local.egress_gateways) > 1 ? 1 : 0
-  name       = "${local.name_prefix}-pgw-egress-passive"
-  type       = "VPC-GW-S"
-  ip_id      = scaleway_vpc_public_gateway_ip.egress_passive[0].id
-  project_id = local.project_id
-  zone       = local.alt_zone
-  tags       = concat(local.common_tags, ["firewall", "pgw-egress", "passive"])
-}
-
-resource "scaleway_vpc_gateway_network" "egress_passive" {
-  count              = length(local.egress_gateways) > 1 ? 1 : 0
-  gateway_id         = scaleway_vpc_public_gateway.egress_passive[0].id
-  private_network_id = module.vpc_egress.private_network_ids["egress"]
-  enable_masquerade  = true
-  # No default push either, the FW owns the default/route-to path (see active).
-  zone = local.alt_zone
-
-  ipam_config {
-    push_default_route = false
-    ipam_ip_id         = scaleway_ipam_ip.egress_pgw_passive[0].id
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Hub Public Gateway: the stable inbound door (management via PAT) on the
-# existing hub PN. No default push (would break routed public IPs and compete
-# with the 0.0.0.0/0 -> FW route). PAT is DNAT-only, so reply routes go back
-# through the door via HUB_GROUP (active -> passive on failover).
-# ---------------------------------------------------------------------------
 resource "scaleway_ipam_ip" "hub_pgw" {
   address    = local.hub_pgw_active_lan_ip
-  is_ipv6    = false
+  is_ipv6    = local.factory.ipam.ipv6
   project_id = local.project_id
   tags       = concat(local.common_tags, ["firewall", "pgw-hub"])
 
@@ -615,43 +636,10 @@ resource "scaleway_ipam_ip" "hub_pgw" {
   }
 }
 
-# Public IP of the hub gateway (the single stable inbound door).
-resource "scaleway_vpc_public_gateway_ip" "hub" {
-  zone = var.zone
-}
-
-resource "scaleway_vpc_public_gateway" "hub" {
-  name       = "${local.name_prefix}-pgw-hub"
-  type       = "VPC-GW-S"
-  ip_id      = scaleway_vpc_public_gateway_ip.hub.id
-  project_id = local.project_id
-  zone       = var.zone
-  tags       = concat(local.common_tags, ["firewall", "pgw-hub"])
-}
-
-# Attach the gateway to the existing hub PN - inbound door only.
-resource "scaleway_vpc_gateway_network" "hub" {
-  gateway_id         = scaleway_vpc_public_gateway.hub.id
-  private_network_id = local.hub_private_network_ids[local.factory.hub_lan_pn_key]
-  enable_masquerade  = true
-  # No default push: hub already steers 0.0.0.0/0 -> FW; a platform default
-  # would compete.
-  zone = var.zone
-
-  ipam_config {
-    push_default_route = false
-    ipam_ip_id         = scaleway_ipam_ip.hub_pgw.id
-  }
-}
-
-# --- Passive Hub Public Gateway (alt zone, cross-AZ door) --------------------
-# Same hub PN + same PAT rules; operators switch to this public IP on active
-# loss. PAT is DNAT-only, so replies must leave via the door they entered,
-# HUB_GROUP pins both halves to the active door.
 resource "scaleway_ipam_ip" "hub_pgw_passive" {
   count      = length(local.hub_gateways) > 1 ? 1 : 0
   address    = local.hub_gateways[1]
-  is_ipv6    = false
+  is_ipv6    = local.factory.ipam.ipv6
   project_id = local.project_id
   tags       = concat(local.common_tags, ["firewall", "pgw-hub", "passive"])
 
@@ -660,63 +648,91 @@ resource "scaleway_ipam_ip" "hub_pgw_passive" {
   }
 }
 
-resource "scaleway_vpc_public_gateway_ip" "hub_passive" {
-  count = length(local.hub_gateways) > 1 ? 1 : 0
-  zone  = local.alt_zone
-}
-
-resource "scaleway_vpc_public_gateway" "hub_passive" {
-  count      = length(local.hub_gateways) > 1 ? 1 : 0
-  name       = "${local.name_prefix}-pgw-hub-passive"
-  type       = "VPC-GW-S"
-  ip_id      = scaleway_vpc_public_gateway_ip.hub_passive[0].id
-  project_id = local.project_id
-  zone       = local.alt_zone
-  tags       = concat(local.common_tags, ["firewall", "pgw-hub", "passive"])
-}
-
-resource "scaleway_vpc_gateway_network" "hub_passive" {
-  count              = length(local.hub_gateways) > 1 ? 1 : 0
-  gateway_id         = scaleway_vpc_public_gateway.hub_passive[0].id
-  private_network_id = local.hub_private_network_ids[local.factory.hub_lan_pn_key]
-  enable_masquerade  = true
-  # Same as active: no default push (hub steers 0.0.0.0/0 -> FW).
-  zone = local.alt_zone
-
-  ipam_config {
-    push_default_route = false
-    ipam_ip_id         = scaleway_ipam_ip.hub_pgw_passive[0].id
-  }
-}
-
-# PAT rules, one full set per door gateway (active + passive), same public
-# ports from local.door_pat_rules (factory YAML, resolved via ipam).
 locals {
-  door_gateway_keys = compact(["active", length(local.hub_gateways) > 1 ? "passive" : ""])
-  door_gateway_ids = {
-    active  = scaleway_vpc_public_gateway.hub.id
-    passive = length(local.hub_gateways) > 1 ? scaleway_vpc_public_gateway.hub_passive[0].id : ""
-  }
-  # PAT rules must live in the gateway's zone (active = var.zone, passive = alt).
-  door_gateway_zones = {
-    active  = var.zone
-    passive = length(local.hub_gateways) > 1 ? local.alt_zone : ""
+  # One entry per gateway. active = var.zone; passive (alt_zone) only when a
+  # passive LAN IP is provisioned. No default push anywhere: spoke egress is
+  # policy-routed (route-to EGRESS_GROUP) and hub steers 0.0.0.0/0 => FW, so a
+  # platform-pushed 0.0.0.0/0 would compete with both.
+  pgws = merge(
+    {
+      egress = {
+        zone        = var.zone
+        name_suffix = "pgw-egress"
+        tags        = local.factory.gateway_tags.egress
+        enable_smtp = local.factory.enable_smtp.egress
+        pn_id       = module.vpc_egress.private_network_ids["egress"]
+        ipam_ip_id  = scaleway_ipam_ip.egress_pgw.id
+      }
+      hub = {
+        zone        = var.zone
+        name_suffix = "pgw-hub"
+        tags        = local.factory.gateway_tags.hub
+        enable_smtp = local.factory.enable_smtp.hub
+        pn_id       = local.hub_private_network_ids[local.factory.hub_lan_pn_key]
+        ipam_ip_id  = scaleway_ipam_ip.hub_pgw.id
+        pat_rules   = local.door_pat
+      }
+    },
+    length(local.egress_gateways) > 1 ? {
+      egress_passive = {
+        zone        = local.alt_zone
+        name_suffix = "pgw-egress-passive"
+        tags        = local.factory.gateway_tags.egress_passive
+        enable_smtp = local.factory.enable_smtp.egress
+        pn_id       = module.vpc_egress.private_network_ids["egress"]
+        ipam_ip_id  = scaleway_ipam_ip.egress_pgw_passive[0].id
+      }
+    } : {},
+    length(local.hub_gateways) > 1 ? {
+      hub_passive = {
+        zone        = local.alt_zone
+        name_suffix = "pgw-hub-passive"
+        tags        = local.factory.gateway_tags.hub_passive
+        enable_smtp = local.factory.enable_smtp.hub
+        pn_id       = local.hub_private_network_ids[local.factory.hub_lan_pn_key]
+        ipam_ip_id  = scaleway_ipam_ip.hub_pgw_passive[0].id
+        pat_rules   = local.door_pat
+      }
+    } : {},
+  )
+}
+
+module "pgws" {
+  source   = "../../../modules/public-gateway"
+  for_each = local.pgws
+
+  name        = "${local.name_prefix}-${each.value.name_suffix}"
+  project_id  = local.project_id
+  zone        = each.value.zone
+  type        = "VPC-GW-S"
+  tags        = concat(local.common_tags, each.value.tags)
+  create_ip   = local.factory.pgws.create_ip
+  enable_smtp = each.value.enable_smtp
+  pat_rules   = lookup(each.value, "pat_rules", {})
+
+  gateway_networks = {
+    main = {
+      private_network_id = each.value.pn_id
+      enable_masquerade  = local.factory.pgws.enable_masquerade
+      push_default_route = local.factory.pgws.push_default_route
+      ipam_ip_id         = each.value.ipam_ip_id
+    }
   }
 }
 
-resource "scaleway_vpc_public_gateway_pat_rule" "door" {
-  for_each = {
-    for combo in setproduct(local.door_gateway_keys, keys(local.door_pat_rules)) :
-    "${combo[0]}:${combo[1]}" => { gw = combo[0], rule = combo[1] }
+# Resolved inbound PAT rule set for the hub doors: target => private LAN IP
+# (via door_target_ip). One full set per door gateway (active + passive),
+# created inside module.pgws["hub"] / module.pgws["hub_passive"] through their
+# pat_rules input - egress gateways carry none.
+locals {
+  door_pat = {
+    for k, v in local.door_pat_rules : k => {
+      private_ip   = local.door_target_ip[v.target]
+      private_port = v.private_port
+      public_port  = v.public_port
+      protocol     = v.protocol
+    }
   }
-
-  gateway_id   = local.door_gateway_ids[each.value.gw]
-  zone         = local.door_gateway_zones[each.value.gw]
-  private_ip   = local.door_target_ip[local.door_pat_rules[each.value.rule].target]
-  private_port = local.door_pat_rules[each.value.rule].private_port
-  public_port  = local.door_pat_rules[each.value.rule].public_port
-  protocol     = local.door_pat_rules[each.value.rule].protocol
-  depends_on   = [scaleway_vpc_gateway_network.hub, scaleway_vpc_gateway_network.hub_passive]
 }
 
 # ---------------------------------------------------------------------------
@@ -740,20 +756,32 @@ resource "scaleway_vpc_public_gateway_pat_rule" "door" {
 
 # Spokes: 0.0.0.0/0 -> hub, inspected by the central FW (which route-to's
 # EGRESS_GROUP + SNATs to the egress VIP).
-resource "scaleway_vpc_route" "spoke1_default_to_hub" {
-  vpc_id                   = local.spoke1_vpc_id
-  description              = "${local.name_prefix}: Spoke-1 default -> Hub firewall"
-  tags                     = concat(local.common_tags, ["opnsense", "central-firewall"])
-  destination              = "0.0.0.0/0"
-  nexthop_vpc_connector_id = local.peering_spoke1_to_hub
-}
+module "spoke_default_routes" {
+  source = "../../../modules/vpc-route"
+  for_each = {
+    spoke1 = {
+      vpc_id       = local.spoke1_vpc_id
+      description  = "${local.name_prefix}: Spoke-1 default -> Hub firewall"
+      connector_id = local.peering_spoke1_to_hub
+    }
+    spoke2 = {
+      vpc_id       = local.spoke2_vpc_id
+      description  = "${local.name_prefix}: Spoke-2 default -> Hub firewall"
+      connector_id = local.peering_spoke2_to_hub
+    }
+  }
 
-resource "scaleway_vpc_route" "spoke2_default_to_hub" {
-  vpc_id                   = local.spoke2_vpc_id
-  description              = "${local.name_prefix}: Spoke-2 default -> Hub firewall"
-  tags                     = concat(local.common_tags, ["opnsense", "central-firewall"])
-  destination              = "0.0.0.0/0"
-  nexthop_vpc_connector_id = local.peering_spoke2_to_hub
+  vpc_id = each.value.vpc_id
+  region = var.region
+
+  routes = {
+    default = {
+      destination              = "0.0.0.0/0"
+      description              = each.value.description
+      nexthop_vpc_connector_id = each.value.connector_id
+      tags                     = concat(local.common_tags, ["opnsense", "central-firewall"])
+    }
+  }
 }
 
 # Hub <-> egress routes are intentionally absent: the firewalls are
@@ -791,95 +819,70 @@ resource "scaleway_vpc_route" "spoke2_default_to_hub" {
 #   nexthop_vpc_connector_id = scaleway_vpc_connector.egress_to_hub.id
 # }
 
-# Hub steering: default 0.0.0.0/0 -> FW CARP LAN VIP via resource next-hop.
-# (A source-based ingress-rule redirect dropped 33-90% of packets in the live
-# VPC.) East-west spoke traffic keeps its more-specific 10.20/10.30 hub
-# routes, so it flows directly instead of through the FW.
-resource "scaleway_vpc_route" "hub_default_to_fw" {
-  vpc_id                     = local.hub_vpc_id
-  description                = "${local.name_prefix}: Hub default -> FW CARP LAN VIP (steer peered spokes to central FW)"
-  tags                       = concat(local.common_tags, ["opnsense", "central-firewall"])
-  destination                = "0.0.0.0/0"
-  nexthop_private_network_id = local.hub_private_network_ids[local.factory.hub_lan_pn_key]
-  nexthop_resource_id        = module.firewall_ha.vip_lan_ipam_id
+module "hub_default_to_fw" {
+  source = "../../../modules/vpc-route"
+  vpc_id = local.hub_vpc_id
+  region = var.region
 
-  # CARP VIP IPAM reservation (created by modules/firewall) must exist and be
-  # attached before the route can resolve it.
-  depends_on = [module.firewall_ha]
+  routes = {
+    hub_default_to_fw = {
+      destination                = "0.0.0.0/0"
+      description                = "${local.name_prefix}: Hub default -> FW CARP LAN VIP (steer peered spokes to central FW)"
+      nexthop_private_network_id = local.hub_private_network_ids[local.factory.hub_lan_pn_key]
+      nexthop_resource_id        = module.firewall_ha.vip_lan_ipam_id
+      tags                       = concat(local.common_tags, ["opnsense", "central-firewall"])
+    }
+  }
+
+  # nexthop_resource_id is the FW CARP VIP IPAM reservation (created by
+  # modules/firewall) - the reference above wires the dependency automatically.
 }
 
 # ---------------------------------------------------------------------------
 # Firewall management security group
 # ---------------------------------------------------------------------------
-resource "scaleway_instance_security_group" "firewall_mgmt" {
-  count = local.factory.create_firewall_mgmt_sg ? 1 : 0
+module "firewall_mgmt_sg" {
+  source = "../../../modules/security-group"
+  count  = local.factory.create_firewall_mgmt_sg ? 1 : 0
 
   name                    = "${local.name_prefix}-firewall-mgmt-sg"
   project_id              = local.project_id
+  zone                    = var.zone
   inbound_default_policy  = "accept"
   outbound_default_policy = "accept"
+  tags                    = concat(local.common_tags, ["firewall", "management"])
 
-  inbound_rule {
-    action   = "accept"
-    protocol = "ICMP"
-    ip_range = "0.0.0.0/0"
-  }
-  inbound_rule {
-    action     = "accept"
-    protocol   = "TCP"
-    port_range = "1-65535"
-    ip_range   = "0.0.0.0/0"
-  }
-  outbound_rule {
-    action   = "accept"
-    protocol = "ICMP"
-    ip_range = "0.0.0.0/0"
-  }
-  outbound_rule {
-    action     = "accept"
-    protocol   = "TCP"
-    port_range = "1-65535"
-    ip_range   = "0.0.0.0/0"
-  }
-
-  tags = concat(local.common_tags, ["firewall", "management"])
+  inbound_rules = [
+    { action = "accept", protocol = "ICMP", ip_range = "0.0.0.0/0" },
+    { action = "accept", protocol = "TCP", port_range = "1-65535", ip_range = "0.0.0.0/0" },
+  ]
+  outbound_rules = [
+    { action = "accept", protocol = "ICMP", ip_range = "0.0.0.0/0" },
+    { action = "accept", protocol = "TCP", port_range = "1-65535", ip_range = "0.0.0.0/0" },
+  ]
 }
 
 # SGs are zone-scoped: fw-passive (fr-par-1) needs its own in AZ1; fw-active
 # (fr-par-2) uses the one above. Same rules.
-resource "scaleway_instance_security_group" "firewall_mgmt_az1" {
-  count = local.factory.create_firewall_mgmt_sg ? 1 : 0
+module "firewall_mgmt_sg_az1" {
+  source = "../../../modules/security-group"
+  count  = local.factory.create_firewall_mgmt_sg ? 1 : 0
 
   name                    = "${local.name_prefix}-firewall-mgmt-sg-az1"
   project_id              = local.project_id
   zone                    = local.factory.zones["fw-passive"]
   inbound_default_policy  = "accept"
   outbound_default_policy = "accept"
+  tags                    = concat(local.common_tags, ["firewall", "management"])
 
-  inbound_rule {
-    action   = "accept"
-    protocol = "ICMP"
-    ip_range = "0.0.0.0/0"
-  }
-  inbound_rule {
-    action     = "accept"
-    protocol   = "TCP"
-    port_range = "1-65535"
-    ip_range   = "0.0.0.0/0"
-  }
-  outbound_rule {
-    action   = "accept"
-    protocol = "ICMP"
-    ip_range = "0.0.0.0/0"
-  }
-  outbound_rule {
-    action     = "accept"
-    protocol   = "TCP"
-    port_range = "1-65535"
-    ip_range   = "0.0.0.0/0"
-  }
-
-  tags = concat(local.common_tags, ["firewall", "management"])
+  inbound_rules = [
+    { action = "accept", protocol = "ICMP", ip_range = "0.0.0.0/0" },
+    { action = "accept", protocol = "TCP", port_range = "1-65535", ip_range = "0.0.0.0/0" },
+  ]
+  outbound_rules = [
+    { action = "accept", protocol = "ICMP", ip_range = "0.0.0.0/0" },
+    { action = "accept", protocol = "TCP", port_range = "1-65535", ip_range = "0.0.0.0/0" },
+  ]
 }
 
 # ---------------------------------------------------------------------------
@@ -887,24 +890,23 @@ resource "scaleway_instance_security_group" "firewall_mgmt_az1" {
 # lz-<env> project so the ambient key can reach it; the upload-wait gate below
 # blocks the snapshot import until the golden qcow2 is present.
 # ---------------------------------------------------------------------------
-resource "scaleway_object_bucket" "image_import" {
-  count      = 1
+module "image_import_bucket" {
+  source = "../../../modules/object-storage"
+
   name       = local.image_bucket_name
   project_id = local.project_id
   region     = var.region
   tags       = merge(local.common_tags_map, { "firewall-image" = "true" })
 
-  # Empty before destroy: terraform refuses to delete a non-empty bucket
-  # (409). Runs with the apply's credentials, falling back to the per-env
-  # deploy key file on access-denied, so both `make destroy` and a direct
-  # `terraform destroy` empty it cleanly.
-  provisioner "local-exec" {
-    when    = destroy
-    command = <<-EOT
-      set -euo pipefail
-      BUCKET="${self.name}"
-      REGION="${self.region}"
-      ENDPOINT="https://s3.$${REGION}.scw.cloud"
+  # Destructor gate via the module's generic provisioner hook (on_destroy):
+  # empties the bucket before destroy - terraform refuses to delete a non-empty
+  # bucket (409). The module exports BUCKET / REGION / ENDPOINT for the script;
+  # the ambient SCW_* keys are used, with a per-env creds-file fallback on
+  # access-denied, so both `make destroy` and a direct `terraform destroy`
+  # empty it cleanly.
+  provisioner = {
+    command    = <<-EOT
+      export CREDS="../../../.creds/lz-${var.environment}.env"
       export AWS_ACCESS_KEY_ID="$${SCW_ACCESS_KEY:?SCW_ACCESS_KEY must be set}"
       export AWS_SECRET_ACCESS_KEY="$${SCW_SECRET_KEY:?SCW_SECRET_KEY must be set}"
       export AWS_DEFAULT_REGION="$${REGION}"
@@ -914,12 +916,10 @@ resource "scaleway_object_bucket" "image_import" {
       if ! probe="$(aws s3api head-bucket --bucket "$${BUCKET}" --endpoint-url "$${ENDPOINT}" 2>&1)"; then
         case "$${probe}" in
           *AccessDenied*|*Forbidden*|*403*)
-            e="$${BUCKET%-image-import-*}"; env="$${e##*-}"
-            f="../../../.creds/lz-$${env}.env"
-            if [[ -f "$${f}" ]]; then
-              echo "note: ambient key cannot reach $${BUCKET} - switching to $(basename "$${f}")"
-              export SCW_ACCESS_KEY="$(grep -Eo 'SCW_ACCESS_KEY=[^[:space:]]+' "$${f}" | head -1 | cut -d= -f2-)"
-              export SCW_SECRET_KEY="$(grep -Eo 'SCW_SECRET_KEY=[^[:space:]]+' "$${f}" | head -1 | cut -d= -f2-)"
+            if [[ -f "$${CREDS}" ]]; then
+              echo "note: ambient key cannot reach $${BUCKET} - switching to $(basename "$${CREDS}")"
+              export SCW_ACCESS_KEY="$(grep -Eo 'SCW_ACCESS_KEY=[^[:space:]]+' "$${CREDS}" | head -1 | cut -d= -f2-)"
+              export SCW_SECRET_KEY="$(grep -Eo 'SCW_SECRET_KEY=[^[:space:]]+' "$${CREDS}" | head -1 | cut -d= -f2-)"
               export AWS_ACCESS_KEY_ID="$${SCW_ACCESS_KEY}"
               export AWS_SECRET_ACCESS_KEY="$${SCW_SECRET_KEY}"
             fi
@@ -928,12 +928,13 @@ resource "scaleway_object_bucket" "image_import" {
       fi
 
       if aws s3api head-bucket --bucket "$${BUCKET}" --endpoint-url "$${ENDPOINT}" >/dev/null 2>&1; then
-        echo "==> emptying image-import bucket $${BUCKET} before destroy"
+        echo "==> emptying $${BUCKET} before destroy"
         aws s3 rm "s3://$${BUCKET}" --recursive --endpoint-url "$${ENDPOINT}"
       else
         echo "note: $${BUCKET} not accessible/absent - nothing to empty"
       fi
     EOT
+    on_destroy = true
   }
 }
 
@@ -944,7 +945,7 @@ resource "scaleway_object_bucket" "image_import" {
 # error instead of an opaque 2h wait). Covers every configured object_key.
 # ---------------------------------------------------------------------------
 resource "null_resource" "upload_wait" {
-  depends_on = [scaleway_object_bucket.image_import]
+  depends_on = [module.image_import_bucket]
 
   triggers = {
     bucket      = local.image_bucket_name
@@ -1117,7 +1118,7 @@ module "firewall_image_1" {
 
   # Force bucket creation first; never start the long snapshot import before
   # the qcow2 is in the bucket (upload-wait gate).
-  depends_on = [scaleway_object_bucket.image_import, null_resource.upload_wait]
+  depends_on = [module.image_import_bucket, null_resource.upload_wait]
 
   vendor            = local.fw_image_1.vendor
   appliance_version = local.fw_image_1.version
@@ -1149,7 +1150,7 @@ module "firewall_image_2" {
 
   # Force bucket creation first; never start the long snapshot import before
   # the qcow2 is in the bucket (upload-wait gate).
-  depends_on = [scaleway_object_bucket.image_import, null_resource.upload_wait]
+  depends_on = [module.image_import_bucket, null_resource.upload_wait]
 
   vendor            = local.fw_image_2.vendor
   appliance_version = local.fw_image_2.version
@@ -1203,7 +1204,7 @@ module "test_instances" {
   # Rebuild ordering: the instance's DHCP default route only appears after
   # hub_default_to_fw exists (its next-hop is the FW LAN VIP). Without this, a
   # fresh apply can boot hub-test before the route, leaving it dark up to 1h.
-  depends_on = [scaleway_vpc_route.hub_default_to_fw]
+  depends_on = [module.hub_default_to_fw]
 
   # Admin SSH key from bootstrap + public-IP reply policy routing: with both a
   # flexible public IP and a private NIC, the private DHCP default shadows

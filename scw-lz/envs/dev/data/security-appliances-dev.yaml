@@ -34,6 +34,7 @@ egress_cidr: 10.4.0.0/24
 # .10 = CARP VIP, .11/.12 = fw-passive/fw-active. Single source of truth for main.tf.
 # ---------------------------------------------------------------------------
 ipam:
+  ipv6: false             # all IPAM IPs are IPv4 (IPv6 LZ not in scope)
   lan:                # hub PN (Stage 2) - LAN side of the firewalls
     pgw-active: 10.10.0.2    # hub PGW (inbound door) - door reply path
     pgw-passive: 10.10.0.3  # alt hub PGW (fr-par-1) - cross-AZ door failover
@@ -111,8 +112,61 @@ firewall_provider: opnsense
 enable_spoke_asymmetric_rules: true  # spoke-1 -> spoke-2 allowed, reverse blocked
 enable_connectivity_spoke: false     # optional managed S2S VPN client network - OFF
 enable_egress_carp_vip: true         # egress 10.4.0.10 VIP as SNAT source
+# SMTP (port 25) egress allowance, per Public-Gateway role (both active and
+# passive gateways of a role share the value). egress = spokes' outbound NAT
+# path (Scaleway blocks port 25 by default - enable only when mail egress is
+# needed); hub = inbound management door (keep false: PAT/SSH/WEBUI only).
+enable_smtp:
+  egress: false
+  hub: false
+create_firewall_mgmt_sg: true        # dedicated management security group
 create_firewall_mgmt_sg: true        # dedicated management security group
 create_default_routes: false         # Stage 3 wires its own routes (spokes -> hub)
+
+# ---------------------------------------------------------------------------
+# Network topology & gateway behavior (design invariants - flip with care:
+# these define the stage's architecture, not optional extras).
+# ---------------------------------------------------------------------------
+
+# Per-VPC routed topology. sync = firewall HA/sync plane, egress = FW WAN
+# side. enable_routing: the VPC honors routes; enable_custom_routes_propagation:
+# routes learned on the other VPC propagate back; enable_transitivity: the two
+# VPCs can reach each other directly (keep false - isolation baseline).
+vpcs:
+  sync:
+    enable_routing: true
+    enable_custom_routes_propagation: true
+    enable_transitivity: false
+  egress:
+    enable_routing: true
+    enable_custom_routes_propagation: true
+    enable_transitivity: false
+
+# CARP VIPs on the firewall pair (true = HA mode - the stage's whole purpose;
+# false would deploy a non-HA pair).
+enable_vips: true
+
+# Public gateway behavior, all four PGWs. create_ip: every gateway carries its
+# own public IP; enable_masquerade: NAT on; push_default_route: NEVER push
+# 0.0.0.0/0 (the FW owns default + route-to - a platform-pushed default would
+# compete and break policy routing).
+pgws:
+  create_ip: true
+  enable_masquerade: true
+  push_default_route: false
+
+# Extra per-gateway tags, appended to the org common_tags. Keys match the
+# local.pgws map keys in main.tf (egress / egress_passive / hub / hub_passive).
+gateway_tags:
+  egress: [firewall, pgw-egress]
+  egress_passive: [firewall, pgw-egress, passive]
+  hub: [firewall, pgw-hub]
+  hub_passive: [firewall, pgw-hub, passive]
+
+# Module-internal LAN/WAN ping testers inside modules/firewall. Stage 3 runs
+# its own test instances (create_test_instances above) - keep false to avoid a
+# second, redundant test set.
+firewall_module_test_instances: false
 
 # ---------------------------------------------------------------------------
 # Firewall image import - QCOW2 -> object storage -> SBS snapshots -> SBS
@@ -131,9 +185,9 @@ firewall_image_1:
   version: "26.1"
   zones:
     - fr-par-1
-  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw.qcow2
+  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw-26.1-EDIT3c.qcow2
   source_format: qcow2
-  object_key: opnsense-central-fw.qcow2
+  object_key: opnsense-central-fw-26.1-EDIT3c.qcow2
   s3_endpoint: https://s3.fr-par.scw.cloud
   snapshot_size: 25
   enable_upload: false
@@ -145,9 +199,9 @@ firewall_image_2:
   version: "26.1"
   zones:
     - fr-par-2
-  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw.qcow2
+  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw-26.1-EDIT3c.qcow2
   source_format: qcow2
-  object_key: opnsense-central-fw.qcow2
+  object_key: opnsense-central-fw-26.1-EDIT3c.qcow2
   s3_endpoint: https://s3.fr-par.scw.cloud
   snapshot_size: 25
   enable_upload: false

@@ -56,6 +56,25 @@ variable "common_tags" {
 }
 
 # ---------------------------------------------------------------------------
+# Per-node extra user-data, passed through to modules/firewall. This is the
+# light-weight channel for per-node tweaks (cloud-init scripts: sysctl,
+# Syslog, extra rules) that must NOT re-render the opnsense_config XML -
+# changing the XML reboots the whole HA pair. Both default to empty.
+# ---------------------------------------------------------------------------
+
+variable "extra_user_data_passive" {
+  description = "Extra user-data keys for the passive firewall node (map key => content, e.g. 'cloud-init' = script). Merged beside the opnsense_config XML; changing it does not re-import/reboot the pair."
+  type        = map(string)
+  default     = {}
+}
+
+variable "extra_user_data_active" {
+  description = "Extra user-data keys for the active firewall node (map key => content, e.g. 'cloud-init' = script). Merged beside the opnsense_config XML; changing it does not re-import/reboot the pair."
+  type        = map(string)
+  default     = {}
+}
+
+# ---------------------------------------------------------------------------
 # OPNsense secrets - never commit real values.
 # ---------------------------------------------------------------------------
 
@@ -182,6 +201,12 @@ variable "state_secret_key" {
   description = "Secret key for the state bucket."
   type        = string
   default     = ""
+}
+
+variable "state_skip_validation" {
+  description = "Skip AWS-style validation for the S3-compatible state bucket (region/credentials/metadata). Keep true for Scaleway S3 (the default and only sane value) - override only for exotic S3-compatible backends."
+  type        = bool
+  default     = true
 }
 
 variable "stage0_state_path" {

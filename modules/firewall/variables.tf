@@ -272,6 +272,26 @@ variable "fw_active_config_xml" {
   nullable    = true
 }
 
+# ---------------------------------------------------------------------------
+# Extra user-data (per node), merged into the firewall instances' user_data
+# WITHOUT touching the opnsense_config XML key. This is the light-weight
+# channel for per-node tweaks (cloud-init scripts: sysctl, Syslog, extra
+# rules) that must not re-render the XML template - changing opnsense_config
+# reboots the whole HA pair (partner feedback, issue #14).
+# ---------------------------------------------------------------------------
+
+variable "extra_user_data_passive" {
+  description = "Extra user-data keys for the passive node (map key => content), merged into the instance user_data alongside opnsense_config. Leave empty for none."
+  type        = map(string)
+  default     = {}
+}
+
+variable "extra_user_data_active" {
+  description = "Extra user-data keys for the active node (map key => content), merged into the instance user_data alongside opnsense_config. Leave empty for none."
+  type        = map(string)
+  default     = {}
+}
+
 
 # ---------------------------------------------------------------------------
 # Optional management network and second HA network (generic optional
