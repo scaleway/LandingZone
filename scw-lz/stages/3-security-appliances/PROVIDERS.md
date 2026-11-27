@@ -68,7 +68,7 @@ DNAT-only, replies must leave through the door the client entered).
 |---|---|---|
 | Selector | `firewall_provider = "opnsense"` | a new valid value in `variables.tf` validation |
 | Module mapping | `vendor = var.firewall_provider` | none (module already branches on `vendor`) |
-| **HA model** | CARP (vhid 10/11 + IPAM VIPs) | CARP (pfSense), FGCP + `failover.tf` IPAM function (FortiGate), active/passive (Palo Alto) |
+| **HA model** | CARP (vhid 10/11 + IPAM VIPs) | CARP (pfSense), FGCP + IPAM failover fn (FortiGate, planned), active/passive (Palo Alto) |
 | **Config artifact** | `providers/opnsense/opnsense-config.xml.tftpl` -> `fw_passive/active_config_xml` (native `user_data` import) | `providers/<vendor>/<config>.tftpl`, rendered per node, plus its injection method |
 | **Boot image** | OPNsense golden QCOW2 via `firewall_image_1/2` | per-vendor golden (`source_url` + `version` in tfvars) |
 | **Mgmt door map** | WebUI `:8443/:8444/:8445`, SSH `:8022/:8023` | per-vendor plan (all vendors: SSH 22 + HTTPS 443) |

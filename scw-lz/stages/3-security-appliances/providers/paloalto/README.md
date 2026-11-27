@@ -18,8 +18,8 @@ HA**. `modules/firewall` already has `vendor = "paloalto"` scaffolding
    context; the floating **management IP** and the dataplane addresses move on
    failover. The hub steering `0.0.0.0/0 -> FW` route must target the
    dataplane floating IP the pair owns. Module's `is_carp = false` path
-   applies; an IPAM/route re-point mechanism on failover is required
-   (parallel to the FortiGate IPAM failover function).
+   applies; an IPAM/route re-point mechanism on failover is required (see the
+   provider add-on contract).
 4. **Images.** VM-Series QCOW2 (PAN-OS) must be sourced/versioned per release;
    the `firewall_image_1/2` pipeline is generic and applies as-is.
 
