@@ -185,9 +185,9 @@ firewall_image_1:
   version: "26.1"
   zones:
     - fr-par-1
-  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw.qcow2
+  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw-26.1-EDIT3c.qcow2
   source_format: qcow2
-  object_key: opnsense-central-fw.qcow2
+  object_key: opnsense-central-fw-26.1-EDIT3c.qcow2
   s3_endpoint: https://s3.fr-par.scw.cloud
   snapshot_size: 25
   enable_upload: false
@@ -199,9 +199,9 @@ firewall_image_2:
   version: "26.1"
   zones:
     - fr-par-2
-  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw.qcow2
+  source_url: https://ldz-fw-images.s3.fr-par.scw.cloud/Opnsense/26.1/opnsense-central-fw-26.1-EDIT3c.qcow2
   source_format: qcow2
-  object_key: opnsense-central-fw.qcow2
+  object_key: opnsense-central-fw-26.1-EDIT3c.qcow2
   s3_endpoint: https://s3.fr-par.scw.cloud
   snapshot_size: 25
   enable_upload: false
